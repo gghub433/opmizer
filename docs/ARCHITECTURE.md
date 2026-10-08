@@ -32,6 +32,9 @@ ui/                         shared SPA — plain ES2020, NO modules, NO build st
   js/pages/games.js         GinN.pages.games  (list + game detail view)
   js/pages/monitor.js       GinN.pages.monitor
   js/pages/settings.js      GinN.pages.settings
+  js/pages/ai.js            GinN.pages.ai  (AI optimizer: key onboarding, goal, plan review/apply, chat)
+  js/ai/advisor.js          GinN.ai: context collection, request building, transport, validation, apply, localPlan
+  js/vendor/anthropic-sdk.js  official @anthropic-ai/sdk bundled as IIFE (global AnthropicSDK) — generated, do not edit
   js/app.js                 boot: shell (sidebar / bottom tabs), router (#/dashboard ...), start
 android/                    Gradle project (AGP 8.5.2, compileSdk 34, minSdk 29, Java 17, no Kotlin, no androidx)
   app/build.gradle          assets.srcDirs = ['../../ui']
@@ -84,9 +87,50 @@ Back button: Java evaluates `window.__ginnBack && window.__ginnBack()`; result `
 | `openSettings` | `{target}` | `{}` targets: android `developer`, `battery_saver`, `display`, `dnd_access`, `storage`, `app_details:<pkg>`; windows `graphics`, `gamemode`, `power`, `startup`, `storage` |
 | `relaunchAsAdmin` | – | `{}` (Windows only; app restarts elevated) |
 | `openExternal` | `{url}` | `{}` |
+| `aiStatus` | – | `{configured:bool, model:string, transport:'native'|'page'|'mock'}` |
+| `aiConfigure` | `{key?:string, model?:string}` | same as `aiStatus` (key is stored on the device only, never returned) |
+| `aiClear` | – | same as `aiStatus` (forgets the key) |
+| `aiKey` | – | `{key}` — **only** hosts with `transport:'page'` (Android, browser); desktop rejects with `UNSUPPORTED` |
+| `aiMessage` | `{params}` (Messages API request body built by `GinN.ai`) | the raw Message object — **only** desktop (`transport:'native'`, Electron main uses `@anthropic-ai/sdk`) |
 
 Capabilities strings: `tweaks`, `games.detect`, `games.launch`, `games.profile` (PC writes game configs),
-`boost` (Android RAM boost), `dnd`, `saveFile`, `admin` (Windows elevation available).
+`boost` (Android RAM boost), `dnd`, `saveFile`, `admin` (Windows elevation available), `ai` (all hosts),
+`ai.native` (desktop: requests go through Electron main).
+
+## GinN AI (Claude)
+
+The AI optimizer uses the **official Anthropic JS SDK** (`@anthropic-ai/sdk`) with the user's own API key:
+- Windows: Electron main process (`desktop/src/ai.js`): `new Anthropic({apiKey})` → `client.beta.messages.create(params)`.
+  Key encrypted with Electron `safeStorage` (fallback: plain file in userData, flagged) inside ginn-state.json.
+- Android / browser: inside the page with the SDK bundled as a classic script `ui/js/vendor/anthropic-sdk.js`
+  (esbuild IIFE, global `AnthropicSDK`, built by `tools/build-sdk-bundle.sh`) →
+  `new AnthropicSDK.default({apiKey, dangerouslyAllowBrowser:true})`. Android stores the key in private
+  SharedPreferences (`aiConfigure` / `aiKey`). CSP `connect-src 'self' https://api.anthropic.com`.
+- Error codes (Russian messages): `AI_NO_KEY`, `AI_AUTH` (401/403), `AI_BILLING` (402), `AI_RATE` (429),
+  `AI_BUSY` (5xx/529), `AI_NETWORK` (connection/timeout), `AI_BAD_REQUEST` (400/404/413), `AI_REFUSAL`
+  (`stop_reason:"refusal"`), `AI_TRUNCATED` (`stop_reason:"max_tokens"`), `AI_BAD_OUTPUT` (unparseable JSON).
+
+Request (`GinN.ai`, `ui/js/ai/advisor.js`), identical on every platform:
+```js
+{ model: 'claude-opus-5-5' /* user-selectable: claude-sonnet-5-5, claude-haiku-5-5 */, max_tokens: 16000,
+  system: '<stable Russian system prompt>',
+  messages: [{ role:'user', content: '<goal + JSON context: hardware (no personal names), class, stats,
+             tweaks with states, installed games, chosen game/fps, user note>' }],
+  output_config: { effort: 'medium', format: { type: 'json_schema', schema: PLAN_SCHEMA } },
+  betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' /* omitted for Haiku */ }
+```
+No `thinking` field (adaptive thinking is on by default), no forced `tool_choice` (400 on these models).
+PLAN_SCHEMA (all objects `additionalProperties:false`, every property required, `tweakId` enum = this device's
+tweak ids, `gameId` enum = catalog ids for the platform or null):
+`{summary, expectedGain, steps:[{tweakId, enable, reason, priority:'high'|'medium'|'low'}],
+  game: {gameId, fps, preset:'potato'|'balanced', reason, settings:[string]} | null, tips:[string], warnings:[string]}`.
+`GinN.ai.plan()` validates the result against the live tweak list (unknown ids dropped), returns
+`{plan, usage:{input_tokens, output_tokens}, costUsd (approx.), model, source:'ai'|'local'|'demo'}`.
+`GinN.ai.apply(plan, {onStep})` applies chosen steps with the same rules as "Optimize all".
+`GinN.ai.ask(history, question)` — follow-up chat (plain text answer, same context in the system prompt).
+`GinN.ai.localPlan()` — offline rules-based plan (labelled «Базовый анализ без ИИ», never presented as AI).
+Mock host: `?aidemo=1` → `transport:'mock'`, `aiMessage` returns a canned Message built from `localPlan` after ~1.5 s
+(labelled «Демо»); otherwise mock uses `transport:'page'` with a key saved in localStorage.
 
 ### Hardware
 ```js
@@ -163,6 +207,8 @@ radius 14/18/24, font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sa
   region (`-webkit-app-region: drag`, interactive elements `no-drag`) and leaves 140px on the right free
   for the native window buttons (Electron `titleBarOverlay`). Body class `host-windows` / `host-android` / `host-web`.
 - Layout < 900px: top app bar (logo + page title) + bottom tab bar (5 tabs, icons + labels), safe-area insets.
-- Nav: Главная (`#/dashboard`), Оптимизация (`#/optimize`), Игры (`#/games`), Мониторинг (`#/monitor`), Настройки (`#/settings`).
+- Nav (desktop sidebar, 6 items): Главная (`#/dashboard`), Оптимизация (`#/optimize`), ИИ (`#/ai`), Игры (`#/games`),
+  Мониторинг (`#/monitor`), Настройки (`#/settings`). Mobile bottom bar (5 tabs): Главная, Оптимизация, ИИ (centre,
+  accented), Игры, Настройки; Мониторинг is reached from the dashboard live-stats card and from Настройки.
 - Motion: 150–250 ms ease transitions, ring gauge animates, respect `prefers-reduced-motion`.
 - Toasts bottom-center (mobile) / bottom-right (desktop). Sheets slide from bottom on mobile, centered modal on desktop.
