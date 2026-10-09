@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+: allowBackup="false" stops cloud backup but not device-to-device transfer.
+  Nothing GinN stores should move to another phone: the Claude API key (ginn_ai.xml) is a secret,
+  and the "Do not disturb" flag (ginn.xml) only makes sense on this device.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="ginn_ai.xml" />
+        <exclude domain="sharedpref" path="ginn.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="ginn_ai.xml" />
+        <exclude domain="sharedpref" path="ginn.xml" />
+    </device-transfer>
+</data-extraction-rules>

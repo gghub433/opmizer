@@ -4,3 +4,9 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+desktop/node_modules/
+desktop/dist/
+desktop/renderer/
+*.log
+.DS_Store
+tools/sdk-bundle/node_modules/

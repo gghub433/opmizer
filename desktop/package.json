@@ -1,0 +1,59 @@
+{
+  "name": "ginn-desktop",
+  "productName": "GinN",
+  "version": "1.0.0",
+  "description": "GinN — оптимизатор игр для Windows: схема питания, твики системы, профили графики для игр и мониторинг железа.",
+  "author": "GinN",
+  "license": "MIT",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "sync-ui": "node scripts/sync-ui.js",
+    "start": "npm run sync-ui && electron .",
+    "test": "node --test \"test/*.test.js\"",
+    "smoke": "npm run sync-ui && node scripts/smoke.js",
+    "dist": "npm run sync-ui && electron-builder --win nsis portable --x64 --publish never"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.132.1",
+    "systeminformation": "^5.33.15"
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "app.ginn.desktop",
+    "productName": "GinN",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.png",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "GinN",
+      "artifactName": "GinN-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "GinN-Portable-${version}.${ext}"
+    }
+  }
+}

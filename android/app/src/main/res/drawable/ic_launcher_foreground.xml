@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon foreground (also used as the themed/monochrome icon): the white "G" and spark from
+     ui/assets/logo.svg. Paths are in the logo's 512 space; the group maps them into 108dp
+     (x * 0.15 + 15.6), which keeps everything inside the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.15"
+        android:scaleY="0.15"
+        android:translateX="15.6"
+        android:translateY="15.6">
+        <path
+            android:pathData="M352,160A136,136 0,1 0,392 256H276"
+            android:strokeWidth="60"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:fillAlpha="0.9"
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M398,92l10,26 26,10 -26,10 -10,26 -10,-26 -26,-10 26,-10z" />
+    </group>
+</vector>

@@ -1,0 +1,132 @@
+name: Build GinN
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'android/**'
+      - 'ui/**'
+      - 'desktop/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ginn-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        run: gradle -p android assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk GinN.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GinN-android
+          path: GinN.apk
+          if-no-files-found: error
+
+  windows:
+    name: Windows exe
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Copy shared UI into renderer
+        run: npm run sync-ui
+
+      - name: Build installer and portable exe
+        run: npm run dist
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GinN-windows
+          path: |
+            desktop/dist/GinN-Setup-*.exe
+            desktop/dist/GinN-Portable-*.exe
+          if-no-files-found: error
+
+  release:
+    name: Release ginn-latest
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: GinN-android
+          path: out
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: GinN-windows
+          path: out
+
+      - name: Check files
+        run: |
+          ls -la out
+          test -f out/GinN.apk
+          ls out/GinN-Setup-*.exe out/GinN-Portable-*.exe
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NOTES: |
+            **GinN** — оптимизатор игр для телефона и ПК.
+
+            ### Что скачать
+            - **Телефон (Android 10 и новее):** `GinN.apk`
+            - **ПК (Windows 10/11), установщик:** `GinN-Setup-….exe`
+            - **ПК без установки:** `GinN-Portable-….exe` — просто запусти, можно с флешки
+
+            ### Как установить
+            **Android.** Скачай `GinN.apk` и открой его. Если телефон спросит — разреши установку из этого источника (браузера или файлового менеджера) и нажми «Установить».
+
+            **Windows.** Запусти скачанный exe. Программа пока без цифровой подписи, поэтому SmartScreen может показать синее окно: нажми «Подробнее» → «Выполнить в любом случае». Для части твиков GinN попросит права администратора.
+
+            Всё, что меняет GinN, возвращается кнопкой «Откатить». На ПК перед оптимизацией можно создать точку восстановления прямо в приложении.
+
+            Сборка из коммита ${{ github.sha }}.
+        run: |
+          gh release delete ginn-latest --yes --cleanup-tag || true
+          gh release create ginn-latest out/GinN.apk out/GinN-Setup-*.exe out/GinN-Portable-*.exe \
+            --prerelease \
+            --target "${{ github.sha }}" \
+            --title "GinN" \
+            --notes "$NOTES"

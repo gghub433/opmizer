@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.GinN" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/ginn_bg</item>
+        <item name="android:statusBarColor">@color/ginn_bg</item>
+        <item name="android:navigationBarColor">@color/ginn_bg</item>
+        <item name="android:navigationBarDividerColor">@color/ginn_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:colorPrimary">@color/ginn_a1</item>
+        <item name="android:colorAccent">@color/ginn_a2</item>
+        <item name="android:colorBackground">@color/ginn_bg</item>
+    </style>
+</resources>

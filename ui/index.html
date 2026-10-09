@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07080D">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.anthropic.com">
+  <meta name="description" content="GinN — оптимизатор игр для телефона и ПК">
+  <title>GinN</title>
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+  <link rel="stylesheet" href="css/ginn.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="ginn-grad" gradientUnits="userSpaceOnUse" x1="2" y1="2" x2="22" y2="22">
+        <stop offset="0" stop-color="#9B85FF"/>
+        <stop offset="1" stop-color="#22D3EE"/>
+      </linearGradient>
+    </defs>
+  </svg>
+  <div id="app">
+    <div class="boot">
+      <img class="boot-logo is-pulse" src="assets/logo.svg" alt="GinN" width="72" height="72">
+      <div class="boot-title">GinN</div>
+      <p class="boot-text">Загружаю…</p>
+    </div>
+  </div>
+  <noscript><p class="boot-text">Для работы GinN нужен JavaScript.</p></noscript>
+
+  <script src="js/core.js"></script>
+  <script src="js/host.js"></script>
+  <script src="js/mock.js"></script>
+  <script src="js/data/devices.js"></script>
+  <script src="js/data/games.js"></script>
+  <script src="js/lib/mcpack.js"></script>
+  <script src="js/vendor/anthropic-sdk.js"></script>
+  <script src="js/ai/advisor.js"></script>
+  <script src="js/ui/icons.js"></script>
+  <script src="js/ui/components.js"></script>
+  <script src="js/pages/dashboard.js"></script>
+  <script src="js/pages/optimize.js"></script>
+  <script src="js/pages/ai.js"></script>
+  <script src="js/pages/games.js"></script>
+  <script src="js/pages/monitor.js"></script>
+  <script src="js/pages/settings.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

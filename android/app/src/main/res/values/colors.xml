@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- GinN design tokens (docs/ARCHITECTURE.md) -->
+    <color name="ginn_bg">#FF07080D</color>
+    <color name="ginn_surface">#FF10131C</color>
+    <color name="ginn_text">#FFEEF1F8</color>
+    <color name="ginn_a1">#FF7C5CFF</color>
+    <color name="ginn_a2">#FF22D3EE</color>
+</resources>

@@ -3,15 +3,21 @@ plugins {
 }
 
 android {
-    namespace 'com.potato.optimizer'
+    namespace 'app.ginn'
     compileSdk 34
 
     defaultConfig {
-        applicationId 'com.potato.optimizer'
+        applicationId 'app.ginn'
         minSdk 29
         targetSdk 34
         versionCode 1
-        versionName '1.0'
+        versionName '1.0.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
     }
 
     compileOptions {
@@ -19,6 +25,6 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    // веб-приложение лежит в phone/ и подключается как assets (index.html)
-    sourceSets.main.assets.srcDirs = ['../../phone']
+    // The shared web UI (repo/ui) is packaged as APK assets: index.html sits at the assets root.
+    sourceSets.main.assets.srcDirs = ['../../ui']
 }
