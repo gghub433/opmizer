@@ -137,7 +137,9 @@ GinN never asks for claude.ai credentials. Instead it hands the request to the o
 1. `GinN.ai.handoff({goal, gameId, fps, note, context?})` → `{prompt, url}`: a self-contained Russian prompt (rules, the
    device context as compact JSON, the allowed tweak ids, and the exact answer format: a short explanation followed by
    ONE fenced ```json block with the PLAN fields) and `url = 'https://claude.ai/new?q=' + encodeURIComponent(prompt)`
-   (omitted/plain `https://claude.ai/new` when the prompt is longer than 6000 chars).
+   only when that whole URL is ≤ 2000 chars; otherwise plain `https://claude.ai/new` (Russian prompts always take this
+   path — the prompt travels via the clipboard). A pending request is kept in localStorage `ginn.ai.pending` (3 h)
+   so the paste step survives the app being killed while the user is in Claude.
    The UI copies `prompt` with `host.copyText` and opens `url` with `host.openExternal` (Claude app or browser).
 2. The user sends it in Claude (their own free/Pro account) and copies the whole answer.
 3. `GinN.ai.parseAnswer(text, context)` → same result shape as `plan()` with `source:'claude-app'`, `usage:null`,

@@ -228,6 +228,10 @@ window.GinN = window.GinN || {};
     relaunchAsAdmin: function () { return call('relaunchAsAdmin'); },
     /** {url} -> {} */
     openExternal: function (args) { return call('openExternal', typeof args === 'string' ? { url: args } : args); },
+    /** -> {text} — current clipboard text ('' when empty or not text). Used to paste Claude's answer back. */
+    readText: function () {
+      return call('readText').then(function (r) { return { text: r && typeof r.text === 'string' ? r.text : '' }; });
+    },
 
     /* --- GinN AI (Claude). Error codes and texts: GinN.ai (ui/js/ai/advisor.js). --- */
     /** -> {configured:bool, model, transport:'native'|'page'|'mock'} */
@@ -253,7 +257,8 @@ window.GinN = window.GinN || {};
     }
   };
 
-  /** Contract method names (handy for tests / feature checks). */
+  /** Contract method names (handy for tests / feature checks). readText (clipboard, «via Claude app» mode) is a
+   *  later addition: an older native host rejects it with UNSUPPORTED and the UI falls back to a manual paste. */
   host.methods = ['info', 'hardware', 'stats', 'tweaks', 'applyTweak', 'revertAll', 'games', 'launchGame',
     'applyGameProfile', 'revertGameProfile', 'saveFile', 'copyText', 'openSettings', 'relaunchAsAdmin', 'openExternal',
     'aiStatus', 'aiConfigure', 'aiClear', 'aiKey', 'aiMessage'];

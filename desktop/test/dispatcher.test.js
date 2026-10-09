@@ -12,8 +12,8 @@ const quiet = { log: () => {} };
 
 test('allowlist equals the contract method table', () => {
   assert.deepEqual([...METHODS].sort(), ['applyGameProfile', 'applyTweak', 'copyText', 'games', 'hardware', 'info',
-    'launchGame', 'openExternal', 'openSettings', 'relaunchAsAdmin', 'revertAll', 'revertGameProfile', 'saveFile',
-    'stats', 'tweaks', 'aiStatus', 'aiConfigure', 'aiClear', 'aiKey', 'aiMessage'].sort());
+    'launchGame', 'openExternal', 'openSettings', 'readText', 'relaunchAsAdmin', 'revertAll', 'revertGameProfile',
+    'saveFile', 'stats', 'tweaks', 'aiStatus', 'aiConfigure', 'aiClear', 'aiKey', 'aiMessage'].sort());
 });
 
 test('dispatcher rejects unknown methods, prototype keys and handlers outside the allowlist', async () => {
@@ -69,7 +69,7 @@ test('handlers wired end-to-end (non-Windows): info, saveFile, copyText, openExt
     platform: 'linux', si: fakeSi,
     app: { getVersion: () => '1.0.0', isPackaged: false, getAppPath: () => base },
     shell: { openExternal: async (u) => { opened.push(u); }, openPath: async () => '' },
-    clipboard: { writeText: (t) => clip.push(t) },
+    clipboard: { writeText: (t) => clip.push(t), readText: () => clip[clip.length - 1] || '' },
     screen: null, userData: path.join(base, 'ud'), downloads: path.join(base, 'dl'), emit: () => {}
   });
   const d = createDispatcher(host.handlers, quiet);
@@ -86,6 +86,7 @@ test('handlers wired end-to-end (non-Windows): info, saveFile, copyText, openExt
 
   assert.deepEqual(await d('copyText', { text: 'привет' }), { ok: true, data: {} });
   assert.deepEqual(clip, ['привет']);
+  assert.deepEqual(await d('readText'), { ok: true, data: { text: 'привет' } });
   assert.equal((await d('openExternal', { url: 'file:///etc/passwd' })).code, 'BAD_ARGS');
   assert.deepEqual(await d('openExternal', { url: 'https://github.com' }), { ok: true, data: {} });
   assert.deepEqual(opened, ['https://github.com']);
@@ -114,4 +115,91 @@ test('handlers wired end-to-end (non-Windows): info, saveFile, copyText, openExt
     'tempC', 'tempSource', 'thermal'].sort());
   host.dispose();
   fs.rmSync(base, { recursive: true, force: true });
+});
+
+
+function clipHost(clipboard) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ginn-rt-'));
+  const host = h.createHandlers({
+    platform: 'linux', si: new Proxy({}, { get: () => async () => { throw new Error('no probe'); } }),
+    app: { getVersion: () => '1.0.0', isPackaged: false, getAppPath: () => base },
+    shell: { openExternal: async () => {}, openPath: async () => '' },
+    clipboard, screen: null, userData: path.join(base, 'ud'), downloads: path.join(base, 'dl'), emit: () => {}
+  });
+  return {
+    d: createDispatcher(host.handlers, quiet),
+    done() { host.dispose(); fs.rmSync(base, { recursive: true, force: true }); }
+  };
+}
+
+for (const flavour of ['async (Electron 44)', 'sync (older Electron)']) {
+  const async = flavour.startsWith('async');
+  test('readText ' + flavour + ': clipboard text, empty when no text, capped at 200 KB', async () => {
+    let clipText = '';
+    let fail = false;
+    const wrap = (fn) => (async ? (...a) => new Promise((res, rej) => setImmediate(() => {
+      try { res(fn(...a)); } catch (e) { rej(e); }
+    })) : fn);
+    const { d, done } = clipHost({
+      writeText: wrap((t) => { if (fail) throw new Error('X11 selection owner gone'); clipText = t; }),
+      readText: wrap(() => { if (fail) throw new Error('X11 selection owner gone'); return clipText; })
+    });
+
+    // empty clipboard (or an image / files, which Electron reports as '')
+    assert.deepEqual(await d('readText'), { ok: true, data: { text: '' } });
+    assert.deepEqual(await d('readText', {}), { ok: true, data: { text: '' } });
+
+    // round trip through copyText: copyText resolves only after the write, the answer is kept verbatim
+    const answer = 'Вот план 😀:\r\n```json\n{"summary":"Ок","steps":[]}\n```\n';
+    assert.deepEqual(await d('copyText', { text: answer }), { ok: true, data: {} });
+    assert.equal(clipText, answer);
+    assert.deepEqual(await d('readText'), { ok: true, data: { text: answer } });
+
+    // non-string from a broken clipboard backend -> ''
+    for (const v of [undefined, null, 42, { text: 'x' }]) {
+      clipText = v;
+      assert.deepEqual(await d('readText'), { ok: true, data: { text: '' } }, String(v));
+    }
+
+    // huge clipboard is capped at 200 KB and never splits a surrogate pair
+    const CAP = 200 * 1024;
+    clipText = 'я'.repeat(CAP + 5000);
+    let r = await d('readText');
+    assert.equal(r.ok, true);
+    assert.equal(r.data.text.length, CAP);
+    clipText = 'a'.repeat(CAP - 1) + '😀' + 'b'.repeat(10);
+    assert.equal((await d('readText')).data.text, 'a'.repeat(CAP - 1), 'the half emoji at the cap is dropped');
+    clipText = 'a'.repeat(CAP);
+    assert.equal((await d('readText')).data.text.length, CAP, 'exactly at the cap is kept whole');
+
+    // clipboard backend failing -> Russian FAILED, no English leak (both directions)
+    fail = true;
+    r = await d('readText');
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'FAILED');
+    assert.ok(/буфер обмена/.test(r.error) && !/X11/.test(r.error));
+    r = await d('copyText', { text: 'x' });
+    assert.equal(r.code, 'FAILED');
+    assert.ok(/[а-я]/i.test(r.error) && !/X11/.test(r.error));
+    done();
+  });
+}
+
+test('readText: a clipboard that never answers fails in about 3 s instead of hanging the UI', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { d, done } = clipHost({ writeText: async () => {}, readText: () => new Promise(() => {}) });
+  const pending = d('readText');
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(3000);
+  const r = await pending;
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'FAILED');
+  assert.ok(/буфер обмена/.test(r.error));
+  done();
+});
+
+test('readText: host without a clipboard reader answers with empty text', async () => {
+  const { d, done } = clipHost({ writeText: () => {} });
+  assert.deepEqual(await d('readText'), { ok: true, data: { text: '' } });
+  done();
 });

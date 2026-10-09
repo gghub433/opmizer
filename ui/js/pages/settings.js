@@ -24,11 +24,11 @@ window.GinN = window.GinN || {};
 
   var NOTES = {
     android: {
-      can: ['Освобождает ОЗУ перед игрой (Android 10–13 — новее система не разрешает)', 'Включает «Не беспокоить» на время игры', 'Считает потолок FPS по экрану, железу и игре', 'Собирает серые текстуры для Minecraft', 'Составляет личный план с ИИ — с твоим ключом Claude'],
+      can: ['Освобождает ОЗУ перед игрой (Android 10–13 — новее система не разрешает)', 'Включает «Не беспокоить» на время игры', 'Считает потолок FPS по экрану, железу и игре', 'Собирает серые текстуры для Minecraft', 'Составляет личный план с ИИ — через приложение Claude или по API-ключу'],
       cannot: ['Менять системные настройки за тебя — GinN открывает нужный экран', 'Менять настройки внутри других игр — только по списку', 'Показывать загрузку процессора — Android её скрывает']
     },
     windows: {
-      can: ['Включает твики Windows: питание, игровой режим, сеть, ввод', 'Пишет профили графики в файлы игр — с резервной копией', 'Чистит временные файлы и кэш DNS', 'Составляет личный план с ИИ — с твоим ключом Claude', 'Откатывает всё, что менял'],
+      can: ['Включает твики Windows: питание, игровой режим, сеть, ввод', 'Пишет профили графики в файлы игр — с резервной копией', 'Чистит временные файлы и кэш DNS', 'Составляет личный план с ИИ — через приложение Claude или по API-ключу', 'Откатывает всё, что менял'],
       cannot: ['Разгонять процессор или видеокарту', 'Обещать «+200% FPS» — прирост зависит от игры и железа', 'Менять часть параметров без прав администратора']
     }
   };
@@ -135,16 +135,28 @@ window.GinN = window.GinN || {};
           aiBody.appendChild(h('p.set-sub', 'Модуль ИИ не загрузился. Обнови GinN.'));
           return;
         }
+        function appRow() {
+          return h('div.set-row.set-ai-app',
+            h('div.icon-tile.tone-cyan', ui.icon('message', null, 20)),
+            h('div.set-text', h('div.set-title', 'Через приложение Claude'),
+              h('div.set-sub', 'Без ключа: GinN готовит запрос, ты отправляешь его в Claude и вставляешь ответ. Подойдёт бесплатный или Pro-аккаунт — пароль GinN не нужен.')),
+            ui.btn({ label: 'Открыть', icon: 'chevron-right', variant: 'ghost', size: 'sm', onClick: function () { app.go('ai'); } }));
+        }
         G.ai.status().then(function (st) {
           if (!alive) return;
           G.aiUi.setStatus(st);
           ui.clear(aiBody); ui.clear(aiBadge);
           if (st.available === false) {
-            aiBadge.appendChild(ui.badge('Недоступно', 'muted'));
-            aiBody.appendChild(h('p.set-sub', (st.error && st.error.message) || 'Эта версия приложения не поддерживает ИИ.'));
+            // the native side cannot keep a key (old version / no answer), but the Claude app mode needs nothing from it
+            aiBadge.appendChild(ui.badge('Через приложение', 'cyan', 'message'));
+            aiBody.appendChild(appRow());
+            var err = st.error || {};
+            var oldHost = !err.message || err.code === 'UNSUPPORTED' || err.code === 'AI_FAILED';
+            aiBody.appendChild(h('p.ai-fine', ui.icon('info', null, 14),
+              h('span', oldHost ? 'Ключ API не поддерживается этой версией приложения — обнови GinN.' : 'Ключ API сейчас недоступен. ' + err.message)));
             return;
           }
-          aiBadge.appendChild(st.transport === 'mock' ? ui.badge('Демо', 'warn') : st.configured ? ui.badge('Ключ добавлен', 'good', 'check') : ui.badge('Нет ключа', 'muted', 'key'));
+          aiBadge.appendChild(st.transport === 'mock' ? ui.badge('Демо', 'warn') : st.configured ? ui.badge('Ключ добавлен', 'good', 'check') : ui.badge('Через приложение', 'cyan', 'message'));
           var picker = G.aiUi.modelPicker(st.model, function (id) {
             G.ai.configure({ model: id }).then(function (s2) {
               G.aiUi.setStatus(s2);
@@ -155,17 +167,18 @@ window.GinN = window.GinN || {};
           var keyBtns = h('div.set-ai-btns',
             ui.btn({ label: st.configured ? 'Изменить ключ' : 'Добавить ключ', icon: 'key', variant: st.configured ? 'ghost' : 'soft', size: 'sm', onClick: function () { G.aiUi.openKeyEditor({ focusKey: true }); } }),
             st.configured && st.transport !== 'mock' ? ui.btn({ label: 'Удалить', icon: 'trash', variant: 'danger', size: 'sm', onClick: function () { return G.aiUi.removeKey(); } }) : null);
-          aiBody.appendChild(h('div.ai-label', 'Модель'));
-          aiBody.appendChild(picker);
+          aiBody.appendChild(appRow());
           aiBody.appendChild(h('div.set-row.set-ai-key',
             h('div.icon-tile.tone-violet', ui.icon('key', null, 20)),
-            h('div.set-text', h('div.set-title', 'Ключ Claude API'),
+            h('div.set-text', h('div.set-title', 'Ключ Claude API · необязательно'),
               h('div.set-sub', st.transport === 'mock' ? 'Демо-режим: ключ не нужен, запросы к Claude не отправляются.'
                 : st.configured ? (st.transport === 'native' ? 'Хранится в зашифрованном виде на этом компьютере.' : 'Хранится только на этом устройстве.')
-                  : 'Без ключа доступен только базовый анализ по правилам.')),
+                  : 'С ключом GinN сам спрашивает Claude и сразу показывает план. Ключ платный, это не аккаунт Claude.')),
             keyBtns));
+          aiBody.appendChild(h('div.ai-label', 'Модель для API-ключа'));
+          aiBody.appendChild(picker);
           aiBody.appendChild(h('p.ai-fine', ui.icon('shield', null, 14),
-            h('span', 'ИИ видит характеристики устройства и список оптимизаций, но не твои файлы и не имя устройства. Запросы оплачивает владелец ключа.')));
+            h('span', 'Claude видит характеристики устройства и список оптимизаций, но не твои файлы и не имя устройства. Запросы по ключу оплачивает его владелец.')));
         });
       }
       renderAi();

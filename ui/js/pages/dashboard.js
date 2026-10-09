@@ -315,7 +315,7 @@ window.GinN = window.GinN || {};
           h('div.ai-promo-head',
             h('span.ai-promo-ico', ui.icon('sparkles', null, 22)),
             h('div', h('div.ai-promo-kicker', 'GinN AI'), h('h2.ai-promo-title', 'ИИ-оптимизация'))),
-          h('p.ai-promo-text', 'Claude изучит железо, настройки и игры и соберёт личный план: что включить и какой лимит FPS поставить.'),
+          h('p.ai-promo-text', 'Claude изучит железо, настройки и игры и соберёт личный план: что включить и какой лимит FPS поставить. Хватит бесплатного аккаунта Claude.'),
           status, go);
         function load() {
           if (!G.ai) { ui.clear(status); status.appendChild(ui.badge('Модуль ИИ не загрузился', 'bad', 'alert')); return; }
@@ -323,12 +323,10 @@ window.GinN = window.GinN || {};
             if (!alive) return;
             ui.clear(status);
             var last = G.aiUi && G.aiUi.lastResult();
-            if (st.available === false) {
-              status.appendChild(ui.badge('Недоступно в этой версии', 'muted', 'info'));
-              go.setLabel('Базовый анализ');
-            } else if (!st.configured) {
-              status.appendChild(ui.badge('Нужен ключ Claude API', 'warn', 'key'));
-              go.setLabel('Подключить ИИ');
+            if (st.available === false || !st.configured) {   // the Claude app mode needs no key and no host AI support
+              status.appendChild(ui.badge('Через приложение Claude', 'cyan', 'message'));
+              status.appendChild(h('span.ai-promo-model', 'ключ не нужен'));
+              go.setLabel(last ? 'Открыть план' : 'Спросить Claude');
             } else {
               status.appendChild(st.transport === 'mock' ? ui.badge('Демо', 'warn', 'info') : ui.badge('Ключ добавлен', 'good', 'check'));
               status.appendChild(h('span.ai-promo-model', G.aiUi ? G.aiUi.modelName(st.model) : st.model));

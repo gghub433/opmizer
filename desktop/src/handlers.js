@@ -24,6 +24,8 @@ const SETTINGS = {
 };
 
 const MAX_SAVE_BYTES = 64 * 1024 * 1024;
+const MAX_READ_CHARS = 200 * 1024;
+const READ_TIMEOUT_MS = 3000;
 const RESERVED = /^(con|prn|aux|nul|com\d|lpt\d)$/i;
 
 function safeFileName(name) {
@@ -129,9 +131,37 @@ function createHandlers(deps) {
       return { path: p };
     },
 
+    // Electron 44: clipboard.writeText/readText return Promises (older versions are sync; await covers both).
     async copyText(a) {
-      deps.clipboard.writeText(String(a.text == null ? '' : a.text));
+      try { await deps.clipboard.writeText(String(a.text == null ? '' : a.text)); } catch (e) {
+        throw new HostError('FAILED', 'Не удалось скопировать текст', e && e.message);
+      }
       return {};
+    },
+
+    // Pastes Claude's answer in the «via Claude app» mode. Empty / non-text clipboard -> ''.
+    async readText() {
+      if (!deps.clipboard || typeof deps.clipboard.readText !== 'function') return { text: '' };
+      let text;
+      let timer;
+      try {
+        text = await Promise.race([
+          Promise.resolve().then(() => deps.clipboard.readText()),
+          new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('clipboard read timed out')), READ_TIMEOUT_MS);
+          })
+        ]);
+      } catch (e) {
+        throw new HostError('FAILED', 'Не удалось прочитать буфер обмена', e && e.message);
+      } finally {
+        clearTimeout(timer);
+      }
+      text = typeof text === 'string' ? text : '';
+      if (text.length > MAX_READ_CHARS) {
+        text = text.slice(0, MAX_READ_CHARS);
+        if (/[\ud800-\udbff]$/.test(text)) text = text.slice(0, -1); // do not cut a surrogate pair in half
+      }
+      return { text };
     },
 
     async openSettings(a) {

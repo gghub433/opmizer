@@ -593,7 +593,10 @@ window.GinN = window.GinN || {};
       if (host.demo) cls.add('is-demo');
       buildShell(root);
       if (!window.location.hash) {
-        try { window.history.replaceState(null, '', '#/dashboard'); } catch (e) { window.location.hash = '#/dashboard'; }
+        // A cold start (Android may have killed GinN while the user was in Claude) with a request still out to Claude:
+        // open GinN AI, where the answer is pasted.
+        var landing = G.aiUi && G.aiUi.waitingForClaude && G.aiUi.waitingForClaude() ? '#/ai' : '#/dashboard';
+        try { window.history.replaceState(null, '', landing); } catch (e) { window.location.hash = landing; }
       }
       render();
       // warm caches

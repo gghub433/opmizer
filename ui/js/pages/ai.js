@@ -1,5 +1,8 @@
-/* GinN — GinN AI (#/ai): key onboarding, goal / game / FPS form, honest loading stages, plan review + apply,
- * follow-up chat. Engine: GinN.ai (js/ai/advisor.js). Shared bits for Главная / Настройки: GinN.aiUi. */
+/* GinN — GinN AI (#/ai). Two ways to get a plan from Claude:
+ *   «Через приложение Claude» (default without a key): GinN.ai.handoff() -> copy the request + open claude.ai (the user's
+ *     own free or Pro account; GinN never signs in) -> the user pastes Claude's answer -> GinN.ai.parseAnswer() -> plan.
+ *   «Автоматически по API-ключу»: key onboarding, honest loading stages, plan, follow-up chat.
+ * Plus «Базовый анализ без ИИ». Engine: GinN.ai (js/ai/advisor.js). Shared bits for Главная / Настройки: GinN.aiUi. */
 window.GinN = window.GinN || {};
 
 (function (G) {
@@ -26,15 +29,51 @@ window.GinN = window.GinN || {};
   function ssLoad() { try { return JSON.parse(window.sessionStorage.getItem(SS_KEY)) || null; } catch (e) { return null; } }
   function ssSave(v) { try { window.sessionStorage.setItem(SS_KEY, JSON.stringify(v)); } catch (e) { /* quota / blocked */ } }
 
+  /* The request out to Claude also goes to localStorage: Android may kill GinN while the user is in Claude, and a new
+   * WebView starts with an empty sessionStorage. Kept for 3 hours; the pasted answer is never stored there. */
+  var PENDING_KEY = 'ai.pending';
+  var PENDING_TTL = 3 * 3600 * 1000;
+  function loadPending() {
+    var p = G.store.get(PENDING_KEY, null);
+    if (!p || typeof p !== 'object') return null;
+    if (typeof p.prompt !== 'string' || !p.prompt || !(Date.now() - (Number(p.askedAt) || 0) < PENDING_TTL)) {
+      G.store.remove(PENDING_KEY);
+      return null;
+    }
+    return p;
+  }
+
   /* ---------------------------------------------------------- session state (survives route changes) */
 
-  var saved = ssLoad() || {};
+  var pending = loadPending();
+  var pendingAt = pending ? pending.askedAt : null;
+  var saved = ssLoad();
+  if (!saved && pending) saved = { mode: 'app', note: pending.note, fps: pending.fps, app: Object.assign({}, pending, { stage: 'asked' }) };
+  saved = saved || {};
+  function appState(a) {
+    a = a && typeof a === 'object' ? a : {};
+    var asked = a.stage === 'asked' && typeof a.prompt === 'string' && !!a.prompt;
+    return {
+      stage: asked ? 'asked' : 'compose',     // 'asked' = the request went to Claude, waiting for the answer
+      prompt: typeof a.prompt === 'string' ? a.prompt : '',
+      url: typeof a.url === 'string' ? a.url : '',
+      context: a.context && typeof a.context === 'object' ? a.context : null,
+      goal: a.goal || null, gameId: a.gameId || null, fps: a.fps || null, note: typeof a.note === 'string' ? a.note : '',
+      askedAt: a.askedAt || 0,
+      answer: typeof a.answer === 'string' ? a.answer : ''
+    };
+  }
   var S = {
     status: null,
     goal: G.store.get('ai.goal', 'fps'),
     gameId: G.store.get('ai.game', null),
-    fps: null,
-    note: '',
+    fps: saved.fps || null,
+    note: typeof saved.note === 'string' ? saved.note : '',
+    mode: saved.mode === 'app' || saved.mode === 'api' ? saved.mode : null,   // null: app without a key, api with one
+    app: appState(saved.app),
+    appError: null,  // inline error of the last «Проверить план» {message}
+    checking: false, // parseAnswer running
+    clipOffer: null, // Claude's answer found on the clipboard after coming back (memory only, never stored)
     view: saved.result ? (saved.view || 'plan') : 'form',
     result: saved.result || null,
     include: saved.include || {},
@@ -46,7 +85,30 @@ window.GinN = window.GinN || {};
     asking: null   // pending chat question
   };
   function persist() {
-    ssSave({ view: S.view, result: S.result, include: S.include, checks: S.checks, chat: S.chat, chatCost: S.chatCost });
+    ssSave({ view: S.view, result: S.result, include: S.include, checks: S.checks, chat: S.chat, chatCost: S.chatCost,
+      mode: S.mode, note: S.note, fps: S.fps, app: S.app });
+    syncPending();
+  }
+  /** Mirrors a request that is out to Claude into localStorage (written once per request), removes it otherwise. */
+  function syncPending() {
+    var a = S.app;
+    if (a.stage === 'asked' && a.prompt) {
+      if (pendingAt === a.askedAt) return;
+      pendingAt = a.askedAt;
+      G.store.set(PENDING_KEY, { prompt: a.prompt, url: a.url, context: a.context, goal: a.goal, gameId: a.gameId,
+        fps: a.fps, note: a.note, askedAt: a.askedAt });
+    } else if (pendingAt !== null) {
+      pendingAt = null;
+      G.store.remove(PENDING_KEY);
+    }
+  }
+  /** A request is out to Claude and no plan is open: the app opens on GinN AI so the answer can be pasted. */
+  function waitingForClaude() { return S.app.stage === 'asked' && !!S.app.prompt && S.view !== 'plan'; }
+  /** 'app' (via the Claude app) or 'api' (own key). Without a working key it is always 'app'. */
+  function currentMode() {
+    var st = S.status;
+    if (!st || st.available === false || !st.configured) return 'app';
+    return S.mode === 'app' ? 'app' : 'api';
   }
 
   var mounted = null;   // {render} of the mounted page, null when the user is elsewhere
@@ -71,6 +133,8 @@ window.GinN = window.GinN || {};
     try { return ai().estimate(model).text; } catch (e) { return ''; }
   }
   function consoleUrl() { return (ai() && ai().CONSOLE_URL) || 'https://console.anthropic.com/'; }
+  function claudeChatsUrl() { return (ai() && ai().CLAUDE_CHATS_URL) || 'https://claude.ai/recents'; }
+  function hhmm(t) { var d = new Date(t); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
   function openConsole() {
     return G.host.openExternal({ url: consoleUrl() }).catch(function (e) { G.app.handleError(e); });
   }
@@ -82,6 +146,7 @@ window.GinN = window.GinN || {};
     var ui = G.ui;
     if (src === 'demo') return ui.badge('Демо', 'warn', 'info');
     if (src === 'local') return ui.badge('Без ИИ', 'muted', 'list-checks');
+    if (src === 'claude-app') return ui.badge('Claude · приложение', 'cyan', 'message');
     return ui.badge('ИИ · Claude', 'grad', 'sparkles');
   }
   function capReasons(limit) {
@@ -202,6 +267,8 @@ window.GinN = window.GinN || {};
     if (!A.looksLikeKey(key)) { field.error(A.ERRORS.AI_BAD_KEY); field.focus(); return Promise.resolve(null); }
     return A.configure({ key: key, model: model }).then(function (st) {
       S.status = st;
+      S.mode = null;   // a fresh key: plans go through the API by default
+      persist();
       return A.verify({ model: model }).then(function (v) {
         if (v && v.checked) ui.toast('Ключ работает — ИИ подключён', { tone: 'good' });
         else if (v && v.demo) ui.toast('Ключ сохранён (демо-режим: запросы к Claude не отправляются)', { tone: 'info' });
@@ -284,11 +351,13 @@ window.GinN = window.GinN || {};
     var ui = G.ui;
     return ui.confirm({
       title: 'Удалить ключ?', danger: true, ok: 'Удалить', okIcon: 'trash',
-      text: 'GinN забудет ключ Claude на этом устройстве. Готовые планы останутся, но новые запросы к ИИ будут недоступны, пока не добавишь ключ снова.'
+      text: 'GinN забудет ключ Claude на этом устройстве. Готовые планы останутся, а новый план можно будет получить через приложение Claude.'
     }).then(function (yes) {
       if (!yes) return false;
       return ai().clear().then(function (st) {
         S.status = st;
+        S.mode = null;
+        persist();
         ui.toast('Ключ удалён', { tone: 'good' });
         rerender();
         G.bus.emit('ui:ai', st);
@@ -410,6 +479,8 @@ window.GinN = window.GinN || {};
         hw = r[1];
         games = r[2] || [];
         render();
+        if (S.view !== 'plan' && !S.busy && currentMode() === 'app' && S.app.stage === 'asked') scrollToPaste();
+        offerClipboard();
       });
 
       /* ------------------------------------------------------------ router of views */
@@ -422,11 +493,12 @@ window.GinN = window.GinN || {};
         ui.clear(actionsSlot);
         root.classList.remove('is-plan', 'is-busy');
         var st = S.status;
-        if (st.configured) {
+        var mode = currentMode();
+        if (mode === 'app') {
+          sub.textContent = st.configured ? 'Через приложение Claude · ключ не нужен' : 'План от Claude — ключ не нужен';
+        } else {
           sub.textContent = st.transport === 'mock' ? 'Демо-режим · ' + modelName(st.model) + ' · запросы к Claude не отправляются'
             : modelName(st.model) + ' · ключ добавлен';
-        } else {
-          sub.textContent = st.available === false ? 'ИИ недоступен в этой версии приложения' : 'Персональный план оптимизации от Claude';
         }
         if (st.configured && st.available !== false) {
           actionsSlot.appendChild(ui.btn({ label: 'Ключ и модель', ariaLabel: 'Ключ и модель', title: 'Ключ и модель', icon: 'key', variant: 'ghost', size: 'sm', onClick: function () { openKeyEditor(); } }));
@@ -439,8 +511,7 @@ window.GinN = window.GinN || {};
           body.appendChild(planView(S.result));
           return;
         }
-        if (st.available === false) { body.appendChild(unavailableView(st)); return; }
-        if (!st.configured) { body.appendChild(onboardingView()); return; }
+        if (mode === 'app') { body.appendChild(appView({ noApi: st.available === false })); return; }
         body.appendChild(formView());
       }
 
@@ -451,80 +522,371 @@ window.GinN = window.GinN || {};
         render();
         page.scrollTop();
       }
-
-      /* ------------------------------------------------------------ onboarding */
-      function featList() {
-        return h('ul.ai-feats',
-          h('li', h('span.ai-feat-ico', ui.icon('cpu', null, 18)), h('span', h('b', 'Изучит железо и нагрев'), h('span', 'процессор, видеокарту, память, экран и температуру'))),
-          h('li', h('span.ai-feat-ico', ui.icon('sliders', null, 18)), h('span', h('b', 'Подберёт оптимизации под цель'), h('span', 'что включить, а что лучше не трогать'))),
-          h('li', h('span.ai-feat-ico', ui.icon('gamepad', null, 18)), h('span', h('b', 'Настроит под игру'), h('span', 'лимит FPS, пресет и список настроек в самой игре'))));
+      function setMode(m) {
+        S.mode = m;
+        S.view = 'form';
+        S.error = null;
+        persist();
+        render();
+        page.scrollTop();
       }
 
-      function heroCard(compact) {
-        return h('section', { class: ['card', 'ai-hero', compact ? 'is-compact' : null] },
-          h('div.ai-hero-bg', { 'aria-hidden': 'true' }),
-          h('div.ai-orb', { 'aria-hidden': 'true' }, h('span.ai-orb-ring'), h('span.ai-orb-core', ui.icon('sparkles', null, compact ? 26 : 32))),
-          h('div.ai-hero-text',
-            h('div.kicker', ui.icon('sparkles', null, 14), 'GinN AI · на базе Claude'),
-            h('h2.ai-hero-title', 'Личный план оптимизации от ИИ'),
-            h('p.ai-hero-sub', 'ИИ изучит твоё устройство, текущие настройки и игры — и соберёт план: что включить, какой лимит FPS поставить и что выставить в самой игре.'),
-            compact ? null : featList()));
-      }
-
+      /* ------------------------------------------------------------ side cards */
       function privacyCard() {
         return h('section.card.ai-privacy',
           h('div.ai-card-head', h('div.icon-tile.tone-cyan', ui.icon('shield', null, 20)),
-            h('div', h('h3.ai-card-title', 'Что увидит ИИ'), h('p.ai-card-sub', 'Только то, что нужно для плана'))),
+            h('div', h('h3.ai-card-title', 'Что увидит Claude'), h('p.ai-card-sub', 'Только то, что нужно для плана'))),
           h('ul.ai-list',
             h('li.is-yes', ui.icon('check', null, 16), h('span', 'Характеристики: процессор, видеокарта, память, экран, батарея')),
             h('li.is-yes', ui.icon('check', null, 16), h('span', 'Состояние настроек GinN, загрузка и нагрев')),
             h('li.is-yes', ui.icon('check', null, 16), h('span', 'Игры из каталога GinN, которые у тебя есть')),
             h('li.is-no', ui.icon('x', null, 16), h('span', 'Не уходят: файлы, имя устройства, аккаунты и другие личные данные'))),
-          h('p.ai-fine', ui.icon('info', null, 14), h('span', 'Работает на Claude от Anthropic. Нужен твой ключ Claude API — запросы оплачивает его владелец.')));
+          h('p.ai-fine', ui.icon('info', null, 14), h('span', 'Через приложение весь запрос виден в чате Claude ещё до отправки. По API-ключу он уходит напрямую в Anthropic.')));
       }
 
-      function localCard() {
-        return h('section.card.ai-local',
-          h('div.ai-card-head', h('div.icon-tile.tone-muted', ui.icon('list-checks', null, 20)),
-            h('div', h('h3.ai-card-title', 'Нет ключа?'), h('p.ai-card-sub', 'Бесплатно и без интернета'))),
-          h('p.ai-text', 'Базовый анализ по правилам GinN: подберёт шаги из рекомендаций под цель «' + ((A.goal(S.goal) || A.GOALS[0]).title) + '». Это не ИИ — просто проверенные правила.'),
-          ui.btn({ label: 'Базовый анализ без ИИ', icon: 'list-checks', variant: 'ghost', block: true, onClick: function () { runAnalysis('local'); } }));
-      }
-
-      function onboardingView() {
+      /** «Автоматически по API-ключу» without a key: the key form, secondary to the Claude app flow. */
+      function keyCard() {
         var model = (S.status && S.status.model) || A.DEFAULT_MODEL;
         var field = keyField();
         var picker = modelPicker(model, function (id) { model = id; });
         var save = ui.btn({
-          label: 'Сохранить и подключить', icon: 'check', variant: 'primary', size: 'lg', block: true, cls: 'btn-glow', busyLabel: 'Проверяю ключ…',
+          label: 'Сохранить ключ', icon: 'check', variant: 'primary', block: true, cls: 'ai-key-save', busyLabel: 'Проверяю ключ…',
           onClick: function () {
-            return saveKey(field, model).then(function (st) { if (st && st.configured) { G.bus.emit('ui:ai', st); render(); } });
+            return saveKey(field, model).then(function (st) { if (st && st.configured) { G.bus.emit('ui:ai', st); render(); page.scrollTop(); } });
           }
         });
         field.input.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') { ev.preventDefault(); save.click(); } });
         var steps = h('ol.ai-keysteps', (A.KEY_STEPS || []).map(function (t, i) { return h('li', h('span.ai-keystep-n', String(i + 1)), h('span', t)); }));
         var how = h('details.ai-how', h('summary', ui.icon('info', null, 16), h('span', 'Как получить ключ'), ui.icon('chevron-down', 'ai-how-chev', 16)), steps);
-        var keyCard = h('section.card.ai-keycard',
+        return h('section.card.ai-keycard.is-secondary',
           h('div.ai-card-head', h('div.icon-tile.tone-violet', ui.icon('key', null, 20)),
-            h('div', h('h3.ai-card-title', 'Подключи Claude'), h('p.ai-card-sub', 'Один раз — ключ останется на этом устройстве'))),
+            h('div', h('h3.ai-card-title', 'Автоматически по API-ключу'),
+              h('p.ai-card-sub', 'План сразу в GinN, без копирования. Нужен платный ключ API — это не аккаунт Claude.'))),
           field.el,
           h('div.ai-label', 'Модель'), picker,
           save,
           h('div.ai-keylinks',
             h('button', { type: 'button', class: 'ai-linkbtn', onClick: openConsole }, ui.icon('external-link', null, 16), h('span', 'Где взять ключ'))),
           how);
-        return h('div.ai-onb',
-          heroCard(false),
-          h('div.ai-onb-grid', keyCard, h('div.ai-onb-side', privacyCard(), localCard())));
       }
 
-      function unavailableView(st) {
-        return h('div.ai-onb', heroCard(true),
-          h('div.card', ui.empty({
-            icon: 'alert', title: 'ИИ недоступен',
-            text: (st.error && st.error.message) || 'Эта версия приложения не поддерживает GinN AI. Обнови GinN.',
-            action: ui.btn({ label: 'Базовый анализ без ИИ', icon: 'list-checks', variant: 'ghost', size: 'sm', onClick: function () { runAnalysis('local'); } })
-          })));
+      /** With a key, while the Claude app mode is open: a way back to automatic plans. */
+      function apiModeCard() {
+        var st = S.status || {};
+        return h('section.card.ai-apimode',
+          h('div.ai-card-head', h('div.icon-tile.tone-good', ui.icon('key', null, 20)),
+            h('div.grow', h('h3.ai-card-title', 'Автоматически по API-ключу'),
+              h('p.ai-card-sub', st.transport === 'mock' ? 'Демо-режим · Claude не вызывается' : 'Ключ добавлен · ' + modelShort(st.model)))),
+          h('p.ai-text', 'GinN сам спросит Claude и сразу покажет план — копировать ничего не нужно.'),
+          ui.btn({ label: 'Анализировать по ключу', icon: 'sparkles', variant: 'soft', block: true, onClick: function () { setMode('api'); } }));
+      }
+
+      function lastPlanCard() {
+        var r = S.result;
+        return h('section.card.ai-last',
+          h('div.ai-card-head', h('div.icon-tile.tone-violet', ui.icon('history', null, 20)),
+            h('div.grow', h('h3.ai-card-title', 'Последний план'), h('p.ai-card-sub', fmt.count(r.plan.steps.length, 'шаг', 'шага', 'шагов') + (r.plan.game ? ' · ' + (G.games.get(r.plan.game.gameId) || {}).name : ''))),
+            sourceBadge(r.source)),
+          ui.btn({ label: 'Открыть план', icon: 'chevron-right', variant: 'soft', size: 'sm', block: true, onClick: function () { S.view = 'plan'; persist(); render(); page.scrollTop(); } }));
+      }
+
+      /* ------------------------------------------------------------ «Через приложение Claude» */
+      var APP_STEPS = [
+        ['Открой Claude', 'GinN соберёт запрос и откроет приложение или сайт'],
+        ['Отправь запрос', 'GinN уже скопировал его — вставь в чат Claude'],
+        ['Скопируй ответ и вернись', 'Вставь его ниже — GinN проверит план']
+      ];
+      var pasteRefs = null;
+
+      function appView(opts) {
+        opts = opts || {};
+        var st = S.status || {};
+        var asked = S.app.stage === 'asked' && !!S.app.prompt;
+        var main = h('div.ai-app-main', flowCard(asked), pasteCard(asked));
+        var side = h('div.ai-side');
+        if (S.result) side.appendChild(lastPlanCard());
+        if (!opts.noApi) side.appendChild(st.configured ? apiModeCard() : keyCard());
+        side.appendChild(privacyCard());
+        if (opts.noApi) {
+          side.appendChild(h('section.card.ai-apimode', h('p.ai-fine', ui.icon('info', null, 14),
+            h('span', 'Режим по API-ключу недоступен в этой версии приложения — обнови GinN. Через приложение Claude всё работает.'))));
+        }
+        return h('div.ai-form.ai-appview', main, side);
+      }
+
+      function flowCard(asked) {
+        var steps = h('ol.ai-appsteps', APP_STEPS.map(function (x, i) {
+          var state = asked ? (i < 2 ? 'done' : 'cur') : (i === 0 ? 'cur' : 'wait');
+          return h('li', { class: ['ai-appstep', 'is-' + state] },
+            h('span.ai-appstep-n', state === 'done' ? ui.icon('check', null, 14) : String(i + 1)),
+            h('span.ai-appstep-text', h('b', x[0]), h('span', x[1])));
+        }));
+        var head = h('div.ai-app-head',
+          h('span.ai-app-ico', ui.icon('message', null, 22)),
+          h('div.grow',
+            h('div.kicker', 'Через приложение Claude'),
+            h('h2.ai-app-title', 'План от Claude — без ключа')));
+        var card = h('section.card.ai-appflow',
+          h('div.ai-hero-bg', { 'aria-hidden': 'true' }),
+          head,
+          h('p.ai-app-sub', 'GinN подготовит запрос с данными устройства, ты отправишь его в Claude и вставишь ответ сюда.'),
+          steps,
+          h('p.ai-fine.ai-app-note', ui.icon('shield', null, 14),
+            h('span', 'Подойдёт бесплатный или Pro-аккаунт Claude. GinN не просит пароль и не входит в твой аккаунт.')));
+        if (asked) card.appendChild(requestSummary());
+        else {
+          card.appendChild(h('div.ai-sec',
+            h('div.ai-sec-head', h('span.ai-sec-n.is-ico', ui.icon('target', null, 14)), h('h2.ai-sec-title', 'Цель'), h('span.ai-sec-sub', 'Что важнее всего')),
+            goalPicker()));
+          card.appendChild(h('div.ai-sec',
+            h('div.ai-sec-head', h('span.ai-sec-n.is-ico', ui.icon('gamepad', null, 14)), h('h2.ai-sec-title', 'Игра'), h('span.ai-sec-sub', 'необязательно')),
+            gamePicker()));
+          card.appendChild(h('div.ai-sec',
+            h('div.ai-sec-head', h('span.ai-sec-n.is-ico', ui.icon('pencil', null, 14)), h('h2.ai-sec-title', 'Что ещё учесть?'), h('span.ai-sec-sub', 'необязательно')),
+            noteField()));
+          var cta = ui.btn({
+            label: 'Спросить в Claude', icon: 'external-link', variant: 'primary', size: 'lg', cls: 'btn-glow ai-cta ai-app-cta', busyLabel: 'Готовлю запрос…',
+            onClick: function () { return askClaude(); }
+          });
+          card.appendChild(h('div.ai-cta-row', cta,
+            h('div.ai-cta-meta', h('span', 'Запрос скопируется, и откроется Claude'), h('span.ai-cta-who', 'бесплатно с твоим аккаунтом Claude'))));
+          card.appendChild(h('div.ai-alt',
+            h('button', { type: 'button', class: 'ai-linkbtn', onClick: function () { runAnalysis('local'); } }, ui.icon('list-checks', null, 16), h('span', 'Базовый анализ без ИИ')),
+            h('span.ai-alt-note', 'по правилам GinN, без интернета')));
+        }
+        return card;
+      }
+
+      /** After «Спросить в Claude»: what was asked + resend / edit. */
+      function requestSummary() {
+        var a = S.app;
+        var goal = A.goal(a.goal) || null;
+        var game = a.gameId ? G.games.get(a.gameId) : null;
+        var chips = h('div.ai-app-req-chips',
+          goal ? ui.badge(goal.title, 'muted', G.icons.has(goal.icon) ? goal.icon : 'zap') : null,
+          game ? ui.badge(game.name + (a.fps ? ' · ' + (a.fps >= 1000 ? 'без лимита' : a.fps + ' FPS') : ''), 'muted', 'gamepad') : null,
+          a.note ? ui.badge('С заметкой', 'muted', 'pencil') : null);
+        return h('div.ai-app-req',
+          h('div.ai-app-req-head', h('span.ai-app-req-ico', ui.icon('check', null, 16)),
+            h('div.grow', h('b', 'Запрос отправлен в Claude'), h('span', a.askedAt ? 'в ' + hhmm(a.askedAt) : ''))),
+          chips,
+          h('div.ai-app-req-acts',
+            ui.btn({ label: 'Открыть Claude ещё раз', icon: 'external-link', variant: 'soft', size: 'sm', onClick: function () { return sendToClaude(); } }),
+            ui.btn({ label: 'Скопировать запрос', icon: 'copy', variant: 'ghost', size: 'sm', onClick: function () { return copyPrompt(); } }),
+            ui.btn({ label: 'Изменить', icon: 'pencil', variant: 'plain', size: 'sm', cls: 'ai-app-edit', onClick: function () { editRequest(); } })));
+      }
+
+      /** The paste step is where the user lands when coming back from Claude. */
+      function scrollToPaste() {
+        var el = root.querySelector('.ai-paste');
+        if (!el) return;
+        try { el.scrollIntoView({ block: 'start', behavior: 'auto' }); } catch (e) { /* ignore */ }
+      }
+
+      function editRequest() {
+        S.app.stage = 'compose';
+        S.clipOffer = null;
+        persist();
+        render();
+        page.scrollTop();
+      }
+
+      function pasteCard(asked) {
+        var ta = h('textarea.ai-paste-input', {
+          rows: 7, placeholder: 'Вставь сюда ответ Claude', 'aria-label': 'Вставь сюда ответ Claude',
+          spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off'
+        });
+        ta.value = S.app.answer || '';
+        var saveT = 0;
+        ta.addEventListener('input', function () {
+          S.appError = null; paintPasteError();
+          updCheck();
+          clearTimeout(saveT);
+          saveT = setTimeout(function () { S.app.answer = ta.value; persist(); }, 250);
+        });
+        var pasteBtn = ui.btn({ label: 'Вставить из буфера', icon: 'copy', variant: 'ghost', cls: 'ai-paste-btn', busyLabel: 'Читаю буфер…', onClick: function () { return pasteFromClipboard(); } });
+        var checkBtn = ui.btn({ label: 'Проверить план', icon: 'check', variant: 'primary', cls: 'ai-check-btn', busyLabel: 'Проверяю…', onClick: function () { return checkAnswer(ta.value); } });
+        function updCheck() { if (!checkBtn.isBusy()) checkBtn.disabled = !ta.value.trim(); }
+        var chipSlot = h('div.ai-clip-slot');
+        var err = h('div.ai-paste-err', { role: 'alert' });
+        pasteRefs = { ta: ta, err: err, chipSlot: chipSlot, check: checkBtn, paste: pasteBtn, updCheck: updCheck };
+        updCheck();
+        paintPasteError();
+        paintClipChip();
+        return h('section', { class: ['card', 'ai-paste', asked ? 'is-active' : 'is-wait'] },
+          h('div.ai-card-head',
+            h('span.ai-paste-n', '3'),
+            h('div.grow', h('h3.ai-card-title', asked ? 'Вставь ответ Claude' : 'Уже есть ответ Claude?'),
+              h('p.ai-card-sub', asked ? 'В Claude нажми «Копировать» под ответом — скопируется всё, вместе с блоком кода'
+                : 'Вставь его сюда — GinN проверит план'))),
+          chipSlot,
+          ta,
+          err,
+          h('div.ai-paste-acts', pasteBtn, checkBtn),
+          h('p.ai-fine', ui.icon('shield', null, 14), h('span', 'GinN сверит каждый шаг со своим списком и ничего не включит без тебя.')));
+      }
+
+      function paintPasteError() {
+        if (!pasteRefs) return;
+        var e = pasteRefs.err;
+        ui.clear(e);
+        e.hidden = !S.appError;
+        if (S.appError) { e.appendChild(ui.icon('alert-circle', null, 16)); e.appendChild(h('span', S.appError.message)); }
+      }
+
+      function paintClipChip() {
+        if (!pasteRefs) return;
+        var slot = pasteRefs.chipSlot;
+        ui.clear(slot);
+        slot.hidden = !S.clipOffer;
+        if (!S.clipOffer) return;
+        slot.appendChild(h('button', {
+          type: 'button', class: 'ai-clip-chip',
+          onClick: function () {
+            var t = S.clipOffer;
+            S.clipOffer = null;
+            paintClipChip();
+            fillAndCheck(t);
+          }
+        }, ui.icon('sparkles', null, 16), h('span', 'Вставить ответ Claude'), h('span.ai-clip-sub', 'из буфера')));
+      }
+
+      /** «Спросить в Claude»: build the request, copy it, open Claude. */
+      function askClaude() {
+        var gameId = S.gameId || null;
+        var fps = gameId ? S.fps || null : null;
+        return A.handoff({ goal: S.goal, gameId: gameId || undefined, fps: fps || undefined, note: S.note }).then(function (r) {
+          if (!alive) return null;
+          S.app = appState({
+            stage: 'asked', prompt: r.prompt, url: r.url, context: r.context,
+            goal: S.goal, gameId: gameId, fps: fps, note: S.note, askedAt: Date.now(), answer: S.app.answer
+          });
+          S.appError = null;
+          S.clipOffer = null;
+          persist();
+          return sendToClaude().then(function () { if (alive && mounted === page) { render(); scrollToPaste(); } });
+        }, function (e) { ui.toast(errOf(e).message, { tone: 'bad' }); });
+      }
+
+      /** Copies the request, then opens claude.ai/new (?q= carries it only when the URL stays short — not for Russian text). */
+      function sendToClaude() {
+        var a = S.app;
+        if (!a.prompt) return Promise.resolve();
+        var inUrl = a.url.indexOf('?q=') > 0;
+        return host.copyText({ text: a.prompt }).then(function () { return true; }, function () { return false; }).then(function (copied) {
+          if (!copied && !inUrl) { promptSheet(); return null; }   // nothing to paste from: show the text to copy by hand
+          return host.openExternal({ url: a.url || (A.CLAUDE_NEW_URL || 'https://claude.ai/new') }).then(function () {
+            ui.toast(!copied ? 'Запрос уже в поле ввода Claude — просто отправь его'
+              : inUrl ? 'Запрос скопирован — если поле в Claude пустое, просто вставь'
+                : 'Запрос скопирован — вставь его в чат Claude и отправь', { tone: 'good', duration: 6000 });
+          }, function () {
+            ui.toast('Не получилось открыть Claude. Открой приложение или сайт claude.ai сам и вставь запрос — он в буфере.', { tone: 'warn', duration: 7000 });
+          });
+        });
+      }
+
+      function copyPrompt() {
+        if (!S.app.prompt) return null;
+        return host.copyText({ text: S.app.prompt }).then(function () {
+          ui.toast('Запрос скопирован', { tone: 'good' });
+        }, function () { promptSheet(); });
+      }
+
+      /** Fallback when the clipboard is blocked: the request in a read-only field to copy by hand. */
+      function promptSheet() {
+        var ta = h('textarea.ai-paste-input.ai-prompt-view', { readOnly: true, rows: 10, 'aria-label': 'Запрос для Claude' });
+        ta.value = S.app.prompt;
+        ui.modal({
+          title: 'Скопируй запрос', icon: 'copy',
+          body: h('div.ai-keysheet', h('p.ai-text', 'Не получилось скопировать автоматически. Выдели текст, скопируй его и вставь в чат Claude.'), ta),
+          actions: [
+            { label: 'Открыть Claude', icon: 'external-link', variant: 'primary', onClick: function () {
+              host.openExternal({ url: A.CLAUDE_NEW_URL || 'https://claude.ai/new' }).catch(function (e) { G.app.handleError(e); });
+            } }
+          ]
+        });
+        setTimeout(function () { try { ta.focus(); ta.select(); ta.scrollTop = 0; } catch (e) { /* ignore */ } }, 300);
+      }
+
+      function pasteFromClipboard() {
+        if (typeof host.readText !== 'function') { ui.toast('Вставь ответ в поле вручную', { tone: 'info' }); return null; }
+        return host.readText().then(function (r) {
+          var t = (r && r.text) || '';
+          if (!t.trim()) {
+            ui.toast('В буфере пусто — скопируй ответ в Claude', { tone: 'info' });
+            return null;
+          }
+          S.clipOffer = null;
+          paintClipChip();
+          fillAndCheck(t);
+          return null;
+        }, function () {
+          ui.toast('Нет доступа к буферу. Вставь ответ в поле вручную: долгое нажатие → «Вставить».', { tone: 'info', duration: 6000 });
+          if (pasteRefs) { try { pasteRefs.ta.focus(); } catch (e) { /* ignore */ } }
+        });
+      }
+
+      /** Puts the text into the field and runs «Проверить план» through its button (busy state included). */
+      function fillAndCheck(t) {
+        if (!pasteRefs) { checkAnswer(t); return; }
+        pasteRefs.ta.value = t;
+        pasteRefs.updCheck();
+        pasteRefs.check.click();
+      }
+
+      /** «Проверить план»: parseAnswer -> the regular plan view. Errors stay next to the text. */
+      function checkAnswer(text) {
+        if (S.checking) return null;
+        text = String(text == null ? '' : text);
+        S.app.answer = text;
+        S.appError = null;
+        S.checking = true;
+        persist();
+        paintPasteError();
+        var ctxP = S.app.context ? Promise.resolve(S.app.context)
+          : A.collect({ gameId: S.gameId || undefined, fps: S.gameId ? S.fps || undefined : undefined });
+        return ctxP.then(function (c) { return A.parseAnswer(text, c); }).then(function (r) {
+          // fresh tweak states, so the plan shows what is already done
+          return app.tweaks(true).catch(function () { return null; }).then(function () { return r; });
+        }).then(function (r) {
+          S.checking = false;
+          r.goal = S.app.goal || S.goal;
+          S.result = r;
+          S.include = {};
+          S.checks = {};
+          S.chat = [];
+          S.chatCost = 0;
+          S.view = 'plan';
+          S.error = null;
+          S.app.stage = 'compose';
+          S.app.answer = '';
+          S.clipOffer = null;
+          persist();
+          var unknown = (r.dropped || []).filter(function (d) { return d.why === 'unknown'; }).length;
+          ui.toast(unknown ? 'План проверен. ' + fmt.count(unknown, 'шаг', 'шага', 'шагов') + ' не из списка GinN — пропущено.' : 'План проверен — можно применять',
+            { tone: unknown ? 'info' : 'good' });
+          if (mounted === page && alive) { render(); page.scrollTop(); }
+        }, function (e) {
+          S.checking = false;
+          e = errOf(e);
+          S.appError = { message: e.message };
+          paintPasteError();
+          if (pasteRefs) { try { pasteRefs.err.scrollIntoView({ block: 'nearest', behavior: ui.reducedMotion() ? 'auto' : 'smooth' }); } catch (x) { /* ignore */ } }
+        });
+      }
+
+      /** Back from Claude (host:resume / focus) with a request out: offer the answer found on the clipboard. Never applies anything. */
+      function offerClipboard() {
+        if (!alive || S.busy || S.checking || S.view === 'plan' || S.error || currentMode() !== 'app' || S.app.stage !== 'asked') return;
+        if (typeof host.readText !== 'function' || !A.looksLikeAnswer) return;
+        host.readText().then(function (r) {
+          var t = (r && r.text) || '';
+          if (!alive || !A.looksLikeAnswer(t)) return;
+          if (t.trim() === (pasteRefs ? pasteRefs.ta.value : S.app.answer || '').trim()) return;   // already in the field
+          S.clipOffer = t;
+          paintClipChip();
+          if (pasteRefs) { try { pasteRefs.chipSlot.scrollIntoView({ block: 'nearest', behavior: ui.reducedMotion() ? 'auto' : 'smooth' }); } catch (e) { /* ignore */ } }
+        }, function () { /* no clipboard access: the user pastes by hand */ });
       }
 
       /* ------------------------------------------------------------ form */
@@ -651,15 +1013,25 @@ window.GinN = window.GinN || {};
         return h('div.ai-gamepick', row, instCount ? null : h('p.ai-hint', 'Установленных игр не нашлось — выбери из каталога или оставь «Без игры».'), fpsWrap);
       }
 
-      function formView() {
-        var st = S.status;
+      function noteField() {
         var note = h('textarea.ai-note', {
           rows: 3, maxlength: '500', placeholder: 'Например: играю на зарядке, телефон сильно греется, важен пинг',
           'aria-label': 'Что ещё учесть?'
         });
         note.value = S.note || '';
         var counter = h('span.ai-note-count', (note.value.length) + ' / 500');
-        note.addEventListener('input', function () { S.note = note.value; counter.textContent = note.value.length + ' / 500'; });
+        var saveT = 0;
+        note.addEventListener('input', function () {
+          S.note = note.value;
+          counter.textContent = note.value.length + ' / 500';
+          clearTimeout(saveT);
+          saveT = setTimeout(persist, 300);
+        });
+        return h('div.ai-note-wrap', note, counter);
+      }
+
+      function formView() {
+        var st = S.status;
         var cta = ui.btn({
           label: 'Анализировать с ИИ', icon: 'sparkles', variant: 'primary', size: 'lg', cls: 'btn-glow ai-cta',
           onClick: function () { runAnalysis('ai'); }
@@ -676,21 +1048,17 @@ window.GinN = window.GinN || {};
             gamePicker()),
           h('div.ai-sec',
             h('div.ai-sec-head', h('span.ai-sec-n', '3'), h('h2.ai-sec-title', 'Что ещё учесть?'), h('span.ai-sec-sub', 'необязательно')),
-            h('div.ai-note-wrap', note, counter)),
+            noteField()),
           h('div.ai-cta-row', cta, costLine),
           h('div.ai-alt',
             h('button', { type: 'button', class: 'ai-linkbtn', onClick: function () { runAnalysis('local'); } }, ui.icon('list-checks', null, 16), h('span', 'Базовый анализ без ИИ')),
-            h('span.ai-alt-note', 'по правилам GinN, бесплатно')));
+            h('span.ai-alt-note', 'по правилам GinN, бесплатно')),
+          h('div.ai-alt.ai-alt-app',
+            h('button', { type: 'button', class: 'ai-linkbtn ai-to-app', onClick: function () { setMode('app'); } }, ui.icon('message', null, 16), h('span', 'Через приложение Claude')),
+            h('span.ai-alt-note', 'без ключа — с твоим аккаунтом Claude')));
 
         var side = h('div.ai-side');
-        if (S.result) {
-          var r = S.result;
-          side.appendChild(h('section.card.ai-last',
-            h('div.ai-card-head', h('div.icon-tile.tone-violet', ui.icon('history', null, 20)),
-              h('div.grow', h('h3.ai-card-title', 'Последний план'), h('p.ai-card-sub', fmt.count(r.plan.steps.length, 'шаг', 'шага', 'шагов') + (r.plan.game ? ' · ' + (G.games.get(r.plan.game.gameId) || {}).name : ''))),
-              sourceBadge(r.source)),
-            ui.btn({ label: 'Открыть план', icon: 'chevron-right', variant: 'soft', size: 'sm', block: true, onClick: function () { S.view = 'plan'; persist(); render(); page.scrollTop(); } })));
-        }
+        if (S.result) side.appendChild(lastPlanCard());
         side.appendChild(h('section.card.ai-how-card',
           h('h3.ai-card-title', 'Как это работает'),
           h('ol.ai-flow',
@@ -815,15 +1183,20 @@ window.GinN = window.GinN || {};
         var rows = p.steps.map(function (s) { return stepRow(s, tw[s.tweakId]); });
         function updCount() {
           var n = p.steps.filter(function (s) { return included(s, tw[s.tweakId]); }).length;
-          countEl.textContent = p.steps.length ? 'Выбрано ' + n + ' из ' + p.steps.length : 'Менять нечего';
+          countEl.textContent = p.steps.length ? 'Выбрано ' + n + ' из ' + p.steps.length : offList ? 'Нет шагов из списка GinN' : 'Менять нечего';
           applyBtn.disabled = n === 0;
           applyBtn.setLabel(n ? 'Применить план' : 'Отметь шаги');
         }
+        // no steps because Claude named ones GinN does not have — not because everything is already done
+        var offList = (r.dropped || []).some(function (d) { return d.why === 'unknown'; });
         var stepsCard = h('section.card.ai-steps',
           h('div.ai-card-head', h('div.icon-tile.tone-violet', ui.icon('list-checks', null, 20)),
             h('div.grow', h('h3.ai-card-title', 'Шаги плана'), h('p.ai-card-sub', countEl))),
-          p.steps.length ? h('ol.ai-step-list', rows) : h('div.ai-steps-empty', ui.icon('check-circle', null, 18),
-            h('span', r.source === 'local' ? 'Всё рекомендованное для этой цели уже включено.' : 'ИИ не нашёл, что ещё поменять, — система уже настроена.')),
+          p.steps.length ? h('ol.ai-step-list', rows) : h('div', { class: ['ai-steps-empty', offList ? 'is-off-list' : null] },
+            ui.icon(offList ? 'alert-circle' : 'check-circle', null, 18),
+            h('span', offList ? 'Шаги Claude не совпали со списком GinN, поэтому применять нечего. Попроси Claude взять id оптимизаций из запроса.'
+              : r.source === 'local' ? 'Всё рекомендованное для этой цели уже включено.'
+                : r.source === 'claude-app' ? 'Claude не нашёл, что ещё поменять, — система уже настроена.' : 'ИИ не нашёл, что ещё поменять, — система уже настроена.')),
           p.steps.length ? h('div.ai-steps-foot', applyBtn, h('span.ai-fine-inline', ui.icon('rotate-ccw', null, 14), 'Всё можно откатить в «Настройках»')) : null);
         updCount();
 
@@ -874,11 +1247,16 @@ window.GinN = window.GinN || {};
         var meta = h('footer.ai-meta', sourceBadge(r.source), h('span', metaText(r)));
 
         var grid = h('div', { class: ['ai-plan-grid', side.childNodes.length ? null : 'is-single'] }, stepsCard, side.childNodes.length ? side : null);
-        return h('div.ai-plan', hero, warns, grid, chatCard(r), meta);
+        return h('div.ai-plan', hero, warns, grid, r.source === 'claude-app' ? appChatCard() : chatCard(r), meta);
       }
 
       function metaText(r) {
         if (r.source === 'local') return 'Базовый анализ без ИИ · по правилам GinN · бесплатно';
+        if (r.source === 'claude-app') {
+          var unknown = (r.dropped || []).filter(function (d) { return d.why === 'unknown'; }).length;
+          return ['План из приложения Claude', 'шаги сверены со списком GinN'].concat(unknown
+            ? ['пропущено ' + fmt.count(unknown, 'предложение', 'предложения', 'предложений') + ' не из списка'] : []).join(' · ');
+        }
         var u = r.usage || {};
         var tokens = (u.input_tokens || 0) + (u.output_tokens || 0);
         var parts = ['Модель: ' + modelName(r.model)];
@@ -948,6 +1326,29 @@ window.GinN = window.GinN || {};
 
       /* ------------------------------------------------------------ chat */
       var chatRefs = null;
+
+      /** Plans from the Claude app: questions go to the same Claude chat (the API chat needs a key). */
+      function appChatCard() {
+        chatRefs = null;
+        return h('section.card.ai-chat.ai-chat-app',
+          h('div.ai-card-head', h('div.icon-tile.tone-cyan', ui.icon('message', null, 20)),
+            h('div.grow', h('h3.ai-card-title', 'Есть вопросы по плану?'),
+              h('p.ai-card-sub', 'Продолжай разговор в Claude — там уже есть данные твоего устройства'))),
+          h('p.ai-text', 'Если Claude поменяет план, скопируй его новый ответ и вставь в GinN — шаги снова проверятся.'),
+          h('div.ai-chat-app-acts',
+            ui.btn({ label: 'Открыть Claude', icon: 'external-link', variant: 'soft', size: 'sm',
+              onClick: function () { return host.openExternal({ url: claudeChatsUrl() }).catch(function (e) { app.handleError(e); }); } }),
+            ui.btn({ label: 'Вставить новый ответ', icon: 'copy', variant: 'ghost', size: 'sm',
+              onClick: function () {
+                S.mode = currentMode() === 'api' ? 'app' : S.mode;
+                if (S.app.prompt) S.app.stage = 'asked';
+                S.view = 'form';
+                persist();
+                render();
+                page.scrollTop();
+                setTimeout(function () { if (pasteRefs) { try { pasteRefs.ta.focus({ preventScroll: false }); } catch (e) { /* ignore */ } } }, 60);
+              } })));
+      }
       function chatCard(r) {
         var local = r.source === 'local';
         var msgs = h('div.ai-msgs', { 'aria-live': 'polite' });
@@ -1143,6 +1544,7 @@ window.GinN = window.GinN || {};
         back: function () {
           if (S.error) { S.error = null; render(); return true; }
           if (S.view === 'plan' && S.result && !S.busy) { toForm(); return true; }
+          // a request out to Claude stays out (Back goes to Главная); only «Изменить» withdraws it
           return false;
         },
         refresh: function () {
@@ -1153,6 +1555,7 @@ window.GinN = window.GinN || {};
             var changed = old.configured !== st.configured || old.model !== st.model || old.transport !== st.transport || old.available !== st.available;
             S.status = st;
             if (changed && !S.busy) render();
+            offerClipboard();
           });
         }
       };
@@ -1169,6 +1572,7 @@ window.GinN = window.GinN || {};
     removeKey: removeKey,
     lastResult: function () { return S.result; },
     busy: function () { return !!S.busy; },
+    waitingForClaude: waitingForClaude,
     setStatus: function (st) { S.status = st; },
     usd: usd
   };

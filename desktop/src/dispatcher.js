@@ -5,7 +5,8 @@
  */
 const METHODS = Object.freeze([
   'info', 'hardware', 'stats', 'tweaks', 'applyTweak', 'revertAll', 'games', 'launchGame',
-  'applyGameProfile', 'revertGameProfile', 'saveFile', 'copyText', 'openSettings', 'relaunchAsAdmin', 'openExternal',
+  'applyGameProfile', 'revertGameProfile', 'saveFile', 'copyText', 'readText', 'openSettings', 'relaunchAsAdmin',
+  'openExternal',
   'aiStatus', 'aiConfigure', 'aiClear', 'aiKey', 'aiMessage'
 ]);
 const ALLOWED = new Set(METHODS);

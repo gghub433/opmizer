@@ -51,11 +51,16 @@ final class Host {
 
     /** Runs {@code c} on the main thread and waits for its result (directly when already there). */
     static <T> T onUi(Callable<T> c) throws Exception {
+        return onUi(c, UI_TIMEOUT_MS);
+    }
+
+    /** Same as {@link #onUi(Callable)}, waiting at most {@code timeoutMs} for the main thread. */
+    static <T> T onUi(Callable<T> c, long timeoutMs) throws Exception {
         if (Looper.myLooper() == Looper.getMainLooper()) return c.call();
         FutureTask<T> task = new FutureTask<>(c);
         MAIN.post(task);
         try {
-            return task.get(UI_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            return task.get(Math.max(1, timeoutMs), TimeUnit.MILLISECONDS);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) throw (Exception) cause;
@@ -65,6 +70,14 @@ final class Host {
             task.cancel(false);
             throw new HostException(HostException.FAILED, "Приложение не ответило вовремя, попробуй ещё раз");
         }
+    }
+
+    /**
+     * True while GinN's window has input focus — Android 10+ lets an app read the clipboard only then.
+     * Call on the UI thread.
+     */
+    boolean hasWindowFocus() {
+        return !activity.isFinishing() && !activity.isDestroyed() && activity.hasWindowFocus();
     }
 
     /**

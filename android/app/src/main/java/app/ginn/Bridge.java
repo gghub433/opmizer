@@ -9,6 +9,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Html;
 import android.util.Log;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
@@ -30,6 +31,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 final class Bridge {
     static final String JS_NAME = "GinNAndroid";
     private static final String TAG = "GinN";
+
+    /** readText: at most 200 KB of text, the whole call within 3 s (up to 2 s of it waiting for window focus). */
+    static final int MAX_CLIP_CHARS = 200 * 1024;
+    private static final long CLIP_TIMEOUT_MS = 3000;
+    private static final long CLIP_FOCUS_WAIT_MS = 2000;
+    private static final long CLIP_FOCUS_POLL_MS = 100;
+    static final String MSG_CLIP_FAILED = "Не удалось прочитать буфер обмена";
+    static final String MSG_CLIP_FOREIGN_PAGE = "Буфер обмена доступен только интерфейсу GinN";
 
     private final Host host;
     private final WebView web;
@@ -130,6 +139,8 @@ final class Bridge {
                         args.optBoolean("open", false));
             case "copyText":
                 return copyText(str(args, "text"));
+            case "readText":
+                return readText();
             case "openSettings":
                 return Screens.open(host, str(args, "target"));
             case "openExternal":
@@ -192,6 +203,101 @@ final class Bridge {
     }
 
     /**
+     * Clipboard text for the «via Claude app» mode ({"text": "…"}, "" when empty, not text or denied by Android).
+     * Android 10+ lets an app read the clipboard only while its window has input focus. The call comes from the
+     * visible page, but right after switching back from the Claude app the focus can arrive a moment later,
+     * so (off the UI thread) we wait for it briefly, then read on the UI thread. The content is never logged.
+     */
+    private JSONObject readText() throws Exception {
+        final long start = nowMs();
+        String text;
+        try {
+            // the UI thread cannot wait for its own focus change, so only pool threads wait
+            if (Looper.myLooper() != Looper.getMainLooper()) awaitWindowFocus(start + CLIP_FOCUS_WAIT_MS);
+            // one UI-thread hop for both checks, so a stuck UI thread still answers within the 3 s budget
+            text = Host.onUi(() -> {
+                // the clipboard may hold passwords: like aiKey, only the bundled GinN UI may read it (null = refuse)
+                if (destroyed || !isOurUrl(web.getUrl())) return null;
+                ClipboardManager cm = (ClipboardManager) host.app.getSystemService(Context.CLIPBOARD_SERVICE);
+                return cm == null ? "" : clipText(cm.getPrimaryClip(), MAX_CLIP_CHARS);
+            }, start + CLIP_TIMEOUT_MS - nowMs());
+            if (text == null) throw new HostException(HostException.UNSUPPORTED, MSG_CLIP_FOREIGN_PAGE);
+        } catch (HostException e) {
+            if (HostException.UNSUPPORTED.equals(e.code)) throw e;
+            Log.w(TAG, "readText failed: timeout");
+            throw new HostException(HostException.FAILED, MSG_CLIP_FAILED);
+        } catch (SecurityException e) {
+            text = ""; // some vendor builds throw instead of returning null when the app is not focused
+        } catch (Exception e) {
+            Log.w(TAG, "readText failed: " + e.getClass().getSimpleName());
+            throw new HostException(HostException.FAILED, MSG_CLIP_FAILED);
+        }
+        JSONObject o = new JSONObject();
+        o.put("text", text == null ? "" : text);
+        return o;
+    }
+
+    /** Monotonic real-time milliseconds (keeps ticking in Robolectric too, unlike the Android uptime clock). */
+    private static long nowMs() {
+        return System.nanoTime() / 1_000_000L;
+    }
+
+    /** Polls (from a pool thread) until GinN's window has focus or {@code until} ({@link #nowMs()}) passes. */
+    private void awaitWindowFocus(long until) {
+        while (!destroyed) {
+            long left = until - nowMs();
+            if (left <= 0) return;
+            try {
+                if (Boolean.TRUE.equals(Host.onUi(host::hasWindowFocus, left))) return;
+            } catch (Exception e) {
+                return; // the read below reports whatever is wrong
+            }
+            if (until - nowMs() <= CLIP_FOCUS_POLL_MS) return;
+            try {
+                Thread.sleep(CLIP_FOCUS_POLL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    /**
+     * Plain text of a clip: text items joined by line breaks, HTML-only items converted to text, other items
+     * (URIs, intents) skipped. Capped at {@code maxChars} without splitting a surrogate pair. Never null.
+     */
+    static String clipText(ClipData clip, int maxChars) {
+        if (clip == null || maxChars <= 0) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < clip.getItemCount() && sb.length() <= maxChars; i++) {
+            ClipData.Item item = clip.getItemAt(i);
+            if (item == null) continue;
+            CharSequence t = item.getText();
+            if (t == null && item.getHtmlText() != null) {
+                t = trimEnd(Html.fromHtml(item.getHtmlText(), Html.FROM_HTML_MODE_LEGACY)); // drops the </p> breaks
+            }
+            if (t == null || t.length() == 0) continue;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(t, 0, Math.min(t.length(), Math.max(0, maxChars + 1 - sb.length())));
+        }
+        return capChars(sb.toString(), maxChars);
+    }
+
+    private static CharSequence trimEnd(CharSequence t) {
+        int end = t.length();
+        while (end > 0 && Character.isWhitespace(t.charAt(end - 1))) end--;
+        return t.subSequence(0, end);
+    }
+
+    static String capChars(String s, int max) {
+        if (s == null) return "";
+        if (s.length() <= max) return s;
+        int end = max;
+        if (end > 0 && Character.isHighSurrogate(s.charAt(end - 1))) end--;
+        return s.substring(0, end);
+    }
+
+    /**
      * Defence in depth for aiKey: the key is handed out only while the WebView shows the bundled GinN UI
      * (navigation away from it is blocked anyway, see MainActivity.Client).
      */
@@ -202,6 +308,11 @@ final class Bridge {
         } catch (Exception e) {
             return false;
         }
+        return isOurUrl(url);
+    }
+
+    /** True for the bundled GinN UI (appassets https URL or its file:// fallback); used by aiKey and readText. */
+    static boolean isOurUrl(String url) {
         if (url == null) return false;
         Uri u = Uri.parse(url);
         return AssetServer.isAppUrl(u) || AssetServer.isAssetFileUrl(u);

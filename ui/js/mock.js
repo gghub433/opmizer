@@ -480,8 +480,13 @@ window.GinN = window.GinN || {};
     return { path: 'Загрузки/' + name };
   };
 
+  /* In-memory clipboard: the last text copied through the mock (tests may set it). readText falls back to it
+   * when the browser does not let the page read the system clipboard. */
+  var clip = { text: '' };
+
   H.copyText = function (args) {
     var text = String(args.text == null ? '' : args.text);
+    clip.text = text;
     function legacy() {
       try {
         var ta = document.createElement('textarea');
@@ -505,6 +510,18 @@ window.GinN = window.GinN || {};
     }
     if (legacy()) return {};
     fail('FAILED', 'Не удалось скопировать — браузер не дал доступ к буферу обмена');
+  };
+
+  H.readText = function () {
+    var nav = window.navigator;
+    if (nav && nav.clipboard && typeof nav.clipboard.readText === 'function') {
+      try {
+        return Promise.resolve(nav.clipboard.readText()).then(function (t) {
+          return { text: typeof t === 'string' ? t : '' };
+        }, function () { return { text: clip.text || '' }; });
+      } catch (e) { /* not allowed here: fall through */ }
+    }
+    return { text: clip.text || '' };
   };
 
   var SETTINGS_TARGETS = flavour === 'windows'
@@ -625,7 +642,8 @@ window.GinN = window.GinN || {};
   var LATENCY = {
     info: [80, 140], stats: [80, 160], tweaks: [120, 260], hardware: [150, 320],
     applyTweak: [250, 450], revertAll: [320, 450], applyGameProfile: [300, 450], launchGame: [200, 400],
-    aiMessage: [1300, 1700], aiStatus: [40, 90], aiConfigure: [60, 120], aiClear: [60, 120], aiKey: [30, 60]
+    aiMessage: [1300, 1700], aiStatus: [40, 90], aiConfigure: [60, 120], aiClear: [60, 120], aiKey: [30, 60],
+    copyText: [30, 70], readText: [30, 70], openExternal: [40, 90]
   };
 
   var mock = {
@@ -647,6 +665,11 @@ window.GinN = window.GinN || {};
       }, function (e) {
         return { ok: false, code: (e && e.code) || 'FAILED', error: (e && e.code ? e.message : 'Ошибка демо-режима: ' + (e && e.message)) };
       });
+    },
+    /** In-memory clipboard used when the browser blocks navigator.clipboard (tests: GinN.mock.clipboard.set(text)). */
+    clipboard: {
+      get: function () { return clip.text; },
+      set: function (t) { clip.text = String(t == null ? '' : t); }
     },
     /** Clears the mock state for this tab (dev helper). */
     reset: function () {
