@@ -16,6 +16,7 @@ const STEAM_SKIP = new Set([228980, 1070560, 1391110, 1628350, 1493710, 250820, 
   1887720, 1826330, 961940, 1054830, 1113280, 1245040, 1420170, 2348590, 2230260, 2805730, 3658110, 431960]);
 const STEAM_SKIP_NAME = /^proton\b|steam linux runtime|steamworks common|steamvr|redistributable/i;
 const MC_STORE_PKG = 'Microsoft.4297127D64EC6_8wekyb3d8bbwe';
+const RIOT_CLIENT_RE = /(^|[\\/])RiotClientServices\.exe$/i;
 
 /* ---------------------------------------------------------------- parsers */
 
@@ -80,7 +81,7 @@ function epicLaunchUrl(g) {
 
 /** PowerShell that waits up to `seconds` for the game process and raises it to High priority. */
 function boostScript(o) {
-  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const q = runDefault.psQuote;
   const dirs = (o.dirs || []).filter(Boolean).map((d) => q(d.replace(/[\\/]+$/, '') + '\\'));
   const names = (o.names || []).map(q);
   const title = o.title ? q(o.title) : '$null';
@@ -219,6 +220,8 @@ function createGames(deps) {
         if (/valorant/i.test(k)) { dir = winPath(k).replace(/[\\/]live[\\/]?$/i, ''); client = assoc[k] || client; }
       }
     }
+    // Any user may create C:\ProgramData\Riot Games: from that file only Riot's own launcher name is taken.
+    if (client && !RIOT_CLIENT_RE.test(String(client))) client = null;
     if (!exists(dir)) return [];
     if (!client) client = path.join(sysDrive, 'Riot Games', 'Riot Client', 'RiotClientServices.exe');
     return [{ id: 'riot:valorant', name: 'VALORANT', source: 'riot', dir, client: winPath(client) }];
@@ -260,6 +263,17 @@ function createGames(deps) {
     return out;
   }
 
+  /**
+   * True when the exe has a valid Authenticode signature by Riot Games. Its path comes from files and folders
+   * any user can create, and an elevated GinN would start whatever is there with the admin token.
+   */
+  async function riotSigned(file) {
+    const r = await ps('$s=Get-AuthenticodeSignature -LiteralPath ' + runDefault.psQuote(file) + '; ' +
+      "if ($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -match 'CN=\"?Riot Games') { Write-Output 'GINN_SIGNED' }",
+    { timeout: 30000 });
+    return /GINN_SIGNED/.test((r && r.stdout) || '');
+  }
+
   async function launch(args) {
     if (platform !== 'win32') throw unsupported();
     const id = String((args && args.id) || '');
@@ -285,6 +299,9 @@ function createGames(deps) {
       boost.title = 'Minecraft*';
     } else if (g.source === 'riot') {
       if (!exists(g.client)) throw new HostError('NOT_FOUND', 'Не нашёл Riot Client — переустанови его');
+      if (!(await riotSigned(g.client))) {
+        throw new HostError('FAILED', 'Riot Client не прошёл проверку подписи Riot Games — переустанови его с сайта игры');
+      }
       await spawnDetached(g.client, ['--launch-product=valorant', '--launch-patchline=live']).catch(fail);
       boost.names = ['VALORANT-Win64-Shipping'];
     } else if (g.source === 'roblox') {

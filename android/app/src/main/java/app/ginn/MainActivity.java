@@ -57,11 +57,10 @@ public final class MainActivity extends Activity {
         assets = new AssetServer(getAssets());
 
         final boolean debuggable = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
-        if (debuggable) {
-            WebView.setWebContentsDebuggingEnabled(true);
-        }
 
         try {
+            // inside the guard: this static call loads the WebView provider too and throws the same way when it is missing
+            if (debuggable) WebView.setWebContentsDebuggingEnabled(true);
             web = new WebView(this);
         } catch (RuntimeException e) {
             // WebView provider missing or being updated: say so instead of crashing

@@ -26,6 +26,9 @@ final class Tweaks {
 
     static final String OPENED = "Открыты настройки";
 
+    /** Settings.System.PEAK_REFRESH_RATE (@hide, so spelled out). */
+    private static final String PEAK_REFRESH_RATE_SETTING = "peak_refresh_rate";
+
     private Tweaks() {}
 
     static JSONArray list(Host host) throws Exception {
@@ -68,15 +71,29 @@ final class Tweaks {
                 } else {
                     long cur = Math.round(s.refreshHz);
                     long max = Math.round(s.maxRefreshHz);
-                    boolean atMax = s.refreshHz >= s.maxRefreshHz - 1;
-                    state = atMax ? "on" : "off";
                     if (max <= 61) {
+                        state = "on";
                         desc = "Экран работает на " + max + " Гц — это его максимум.";
-                    } else if (atMax) {
+                    } else if (s.refreshHz >= s.maxRefreshHz - 1) {
+                        state = "on";
                         desc = "Экран уже работает на максимальных " + max + " Гц.";
                     } else {
-                        desc = "Сейчас " + cur + " Гц, а экран умеет до " + max
-                                + " Гц. Выбери максимальную частоту в настройках экрана — игры станут плавнее.";
+                        // Adaptive screens (Smooth display, «Адаптивная») drop to 60 Hz by themselves while the picture
+                        // is still, so the current rate says nothing about the user's choice: ask the setting instead.
+                        float peak = peakRefreshSetting(ctx);
+                        if (Float.isNaN(peak)) {
+                            state = "unknown";
+                            desc = "Сейчас " + cur + " Гц, а экран умеет до " + max + " Гц. Частота может снижаться сама, "
+                                    + "когда картинка не меняется, — проверь, что в настройках экрана выбрана максимальная.";
+                        } else if (peak >= s.maxRefreshHz - 1) {
+                            state = "on";
+                            desc = "В настройках выбрана максимальная частота — до " + max + " Гц. Сейчас " + cur
+                                    + " Гц: система сама снижает её, когда картинка не меняется или включена экономия заряда.";
+                        } else {
+                            state = "off";
+                            desc = "В настройках экрана частота ограничена " + Math.round(peak) + " Гц, а экран умеет до "
+                                    + max + " Гц. Выбери максимальную частоту — игры станут плавнее.";
+                        }
                     }
                 }
                 return tweak(id, "graphics", "Максимальная частота экрана", desc,
@@ -141,6 +158,20 @@ final class Tweaks {
         } catch (RuntimeException e) {
             return false;
         }
+    }
+
+    /**
+     * The highest refresh rate the user allows (AOSP "peak_refresh_rate", @Readable for apps; Infinity = no cap).
+     * NaN when it is not set (many OEM ROMs keep their own setting), unreadable or not a real cap.
+     */
+    static float peakRefreshSetting(Context ctx) {
+        float v;
+        try {
+            v = Settings.System.getFloat(ctx.getContentResolver(), PEAK_REFRESH_RATE_SETTING, Float.NaN);
+        } catch (RuntimeException e) {
+            return Float.NaN;
+        }
+        return v > 0 ? v : Float.NaN;
     }
 
     static boolean fastAnimations(Context ctx) {

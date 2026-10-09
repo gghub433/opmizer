@@ -561,6 +561,11 @@ window.GinN = window.GinN || {};
     if (current && typeof current.refresh === 'function') { try { current.refresh(); } catch (e) { console.error(e); } }
   });
 
+  // Desktop: result of the background priority boost started by «Играть с ускорением».
+  G.bus.on('host:boost', function (e) {
+    if (e && e.message) ui.toast(String(e.message), { tone: e.ok ? 'good' : 'info' });
+  });
+
   /* ------------------------------------------------------------- boot */
 
   function bootError(root, e) {

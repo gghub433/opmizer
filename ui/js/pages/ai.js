@@ -986,7 +986,7 @@ window.GinN = window.GinN || {};
               h('div.ai-bubble', ui.icon('alert-circle', null, 16), h('span', m.content),
                 m.code === 'AI_AUTH' || m.code === 'AI_NO_KEY'
                   ? h('button', { type: 'button', class: 'link-btn', onClick: function () { openKeyEditor({ focusKey: true }); } }, 'Проверь ключ')
-                  : h('button', { type: 'button', class: 'link-btn', onClick: function () { retryAsk(m); } }, 'Повторить'))));
+                  : h('button', { type: 'button', class: 'link-btn', disabled: !!S.asking, onClick: function () { retryAsk(m); } }, 'Повторить'))));
             return;
           }
           c.msgs.appendChild(h('div', { class: ['ai-msg', m.role === 'user' ? 'is-user' : 'is-ai'] },
@@ -1004,11 +1004,13 @@ window.GinN = window.GinN || {};
       }
 
       function retryAsk(m) {
+        if (S.asking || !S.result) return;   // ask() would not start: keep the error and its «Повторить»
         var i = S.chat.indexOf(m);
         if (i >= 0) S.chat.splice(i, 1);
         var q = m.question;
-        // drop the unanswered user turn too; ask() re-adds it
-        if (S.chat.length && S.chat[S.chat.length - 1].role === 'user' && S.chat[S.chat.length - 1].content === q) S.chat.pop();
+        // drop the unanswered user turn too (right before its error); ask() re-adds it at the end
+        var u = i > 0 ? S.chat[i - 1] : null;
+        if (u && u.role === 'user' && !u.error && u.content === q) S.chat.splice(i - 1, 1);
         ask(q);
       }
 
@@ -1024,7 +1026,8 @@ window.GinN = window.GinN || {};
         paintChat();
         scrollChat();
         A.ask({ history: history, question: q, context: r.context, plan: r.plan, model: S.status && S.status.model }).then(function (a) {
-          if (S.result !== r) { S.asking = null; return; }   // a new plan replaced this conversation
+          // a new plan replaced this conversation: only unlock its chat
+          if (S.result !== r) { S.asking = null; if (mounted && mounted.chat) mounted.chat(); return; }
           S.asking = null;
           S.chat.push({ role: 'assistant', content: a.text });
           if (typeof a.costUsd === 'number') S.chatCost += a.costUsd;
@@ -1032,7 +1035,7 @@ window.GinN = window.GinN || {};
           if (mounted && mounted.chat) mounted.chat();
         }, function (e) {
           e = errOf(e);
-          if (S.result !== r) { S.asking = null; return; }
+          if (S.result !== r) { S.asking = null; if (mounted && mounted.chat) mounted.chat(); return; }
           S.asking = null;
           S.chat.push({ role: 'assistant', error: true, content: e.message, code: e.code, question: q });
           persist();

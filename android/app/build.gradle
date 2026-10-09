@@ -14,10 +14,32 @@ android {
         versionName '1.0.0'
     }
 
+    // Published APKs are release builds (not debuggable: no run-as / JDWP / WebView DevTools access to the
+    // stored AI key). CI signs them with the GINN_KEYSTORE* secrets when present, otherwise with the debug key.
+    def releaseKeystore = System.getenv('GINN_KEYSTORE')
+    def hasReleaseKey = releaseKeystore && new File(releaseKeystore).exists()
+
+    signingConfigs {
+        if (hasReleaseKey) {
+            release {
+                storeFile file(releaseKeystore)
+                storePassword System.getenv('GINN_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('GINN_KEY_ALIAS')
+                keyPassword System.getenv('GINN_KEY_PASSWORD')
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig hasReleaseKey ? signingConfigs.release : signingConfigs.debug
         }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
     }
 
     compileOptions {

@@ -97,7 +97,8 @@ window.GinN = window.GinN || {};
     '- summary: одно-два предложения — что сейчас мешает и что изменит план.',
     '- expectedGain: честная оценка одной фразой, например «+5–10% FPS и меньше просадок».',
     '- steps: оптимизации из tweaks в порядке применения, самые полезные первыми. reason — одно короткое предложение для геймера: зачем этот шаг. ' +
-      'Не добавляй шаги, которые ничего не меняют (state уже нужный). enable: true — включить, false — выключить; для kind "action" и "link" всегда true. ' +
+      'Не добавляй шаги, которые ничего не меняют (state уже нужный). enable всегда true: план GinN только включает оптимизации ' +
+      '(выключенное планом «Вернуть всё» не вернёт); если что-то из включённого лучше выключить — скажи об этом в tips. ' +
       'Шаги kind "link" GinN не выполняет сам, а открывает экран настроек — в reason скажи, что там сделать.',
     '- Если isAdmin равно false, шаги с requiresAdmin ставь в конец с priority "low" и в reason добавь, что нужны права администратора.',
     '- Для цели «Меньше нагрев и расход батареи» на ноутбуке или телефоне не включай схемы питания на максимум и отключение энергосбережения процессора; предложи лимит FPS пониже.',
@@ -707,16 +708,17 @@ window.GinN = window.GinN || {};
     var fps = Math.round(Number(g.fps));
     if (!isNum(fps) || fps <= 0) fps = lim.recommended;
     fps = clampN(fps, Math.min(30, lim.max), lim.max);
+    fps = stepAtMost(lim.steps, fps, fps);   // the game page only offers these steps and ignores any other saved value
     var preset = PRESETS.indexOf(g.preset) >= 0 ? g.preset
       : /bal|баланс/i.test(String(g.preset || '')) ? 'balanced' : 'potato';
     return { gameId: entry.id, fps: fps, preset: preset, reason: str(g.reason), settings: uniqStrings(g.settings, 12, 200) };
   }
 
   /**
-   * normalize(rawPlan, context) -> {plan, dropped:[{tweakId, why:'unknown'|'duplicate'|'noop'}]}
+   * normalize(rawPlan, context) -> {plan, dropped:[{tweakId, why:'unknown'|'duplicate'|'noop'|'disable'}]}
    * Validates against the live tweak list: unknown ids and duplicates are dropped, steps that would change
-   * nothing are dropped, admin-only steps go last with priority 'low' when GinN is not elevated,
-   * game.fps is clamped to the FPS limit and the preset coerced.
+   * nothing or switch a toggle off are dropped, admin-only steps go last with priority 'low' when GinN is not elevated,
+   * game.fps is clamped to the FPS limit and snapped down to a selectable step, and the preset coerced.
    */
   function normalize(raw, context) {
     var r = obj(raw), ctx = obj(context);
@@ -729,12 +731,12 @@ window.GinN = window.GinN || {};
       if (!t) { dropped.push({ tweakId: id, why: 'unknown' }); return; }
       if (seen[id]) { dropped.push({ tweakId: id, why: 'duplicate' }); return; }
       seen[id] = true;
-      var enable = t.kind === 'toggle' ? s.enable !== false : true;
-      var noop = (t.kind === 'toggle' && ((enable && t.state === 'on') || (!enable && t.state === 'off'))) ||
-        (t.kind === 'link' && t.state === 'on');
+      // Hosts back up a setting only when GinN switches it on: one switched off here could not be brought back by «Вернуть всё».
+      if (t.kind === 'toggle' && s.enable === false) { dropped.push({ tweakId: id, why: 'disable' }); return; }
+      var noop = (t.kind === 'toggle' || t.kind === 'link') && t.state === 'on';
       if (noop) { dropped.push({ tweakId: id, why: 'noop' }); return; }
       steps.push({
-        tweakId: id, enable: enable,
+        tweakId: id, enable: true,
         reason: str(s.reason, 300) || str(t.desc, 300),
         priority: PRIORITIES.indexOf(s.priority) >= 0 ? s.priority : 'medium'
       });
@@ -865,6 +867,7 @@ window.GinN = window.GinN || {};
     else if (goal === 'cool') fps = stepAtMost(lim.steps, Math.min(mobile ? 60 : 90, lim.max), lim.max);
     else if (goal === 'stable') fps = lim.recommended <= 60 ? lim.recommended : stepAtMost(lim.steps, Math.floor(lim.recommended * 0.9), lim.recommended);
     else fps = ctx.platform === 'windows' ? Math.min(lim.max, Math.max(lim.recommended, 240)) : lim.max;
+    fps = stepAtMost(lim.steps, fps, fps);   // same value normGame() keeps, so the summary and reason match the card
     var preset = goal === 'fps' || goal === 'cool' || tier <= 2 ? 'potato' : 'balanced';
     var settings = [];
     if (G.games && G.games.recipe) {

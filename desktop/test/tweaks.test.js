@@ -119,6 +119,16 @@ test('disable without a backup falls back to documented defaults (HAGS off = 1, 
   assert.equal(w.getValue(GFX, 'HwSchMode'), 1);
 });
 
+test('turning off a setting that was on before GinN keeps it, so revertAll turns it back on', async () => {
+  const { w, store, t } = setup({ admin: true, registry: { [GFX]: { HwSchMode: ['REG_DWORD', 2] } } });
+  assert.equal((await t.apply({ id: 'hags', enable: false })).state, 'off');
+  assert.equal(w.getValue(GFX, 'HwSchMode'), 1);
+  assert.ok(store.data.tweaks.hags, 'the user value is backed up before writing the default');
+  await t.revertAll();
+  assert.equal(w.getValue(GFX, 'HwSchMode'), 2);
+  assert.equal(await stateOf(t, 'hags'), 'on');
+});
+
 test('backup taken while already on -> disable still turns it off via defaults', async () => {
   const { w, t } = setup({ registry: { 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize': { EnableTransparency: ['REG_DWORD', 0] } } });
   await t.apply({ id: 'transparency_off', enable: true });
@@ -300,6 +310,90 @@ test('clean_temp accepts a Remote Desktop session folder (Temp\\2) but not other
   await assert.rejects(only.apply({ id: 'clean_temp' }), { code: 'NOT_FOUND' });
   run.setRunner(null);
   fs.rmSync(base, { recursive: true, force: true });
+});
+
+test('clean_temp: a folder swapped for a link after its lstat is never walked or deleted through', async () => {
+  const fsp = require('node:fs/promises');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ginn-clean-race-'));
+  const temp = path.join(base, 'Temp');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(path.join(temp, 'x'), { recursive: true });
+  fs.mkdirSync(outside);
+  const old = Date.now() / 1000 - 5 * 3600;
+  for (const p of [path.join(temp, 'x', 'decoy.txt'), path.join(outside, 'precious.txt')]) {
+    fs.writeFileSync(p, 'data');
+    fs.utimesSync(p, old, old);
+  }
+  fs.utimesSync(path.join(temp, 'x'), old, old);
+  const origLstat = fsp.lstat;
+  let swapped = false;
+  fsp.lstat = async (p, ...a) => {
+    const r = await origLstat(p, ...a);
+    if (!swapped && p === path.join(temp, 'x')) { // another user swaps the folder right after GinN looked at it
+      swapped = true;
+      fs.rmSync(path.join(temp, 'x'), { recursive: true });
+      fs.symlinkSync(outside, path.join(temp, 'x'), process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    return r;
+  };
+  try {
+    run.setRunner(fakeWindows().runner);
+    const t = tw.createTweaks({ platform: 'win32', store: memoryStore(), isAdmin: async () => true, tempRoots: () => [temp], env: {} });
+    const r = await t.apply({ id: 'clean_temp' });
+    assert.ok(swapped);
+    assert.deepEqual(fs.readdirSync(outside), ['precious.txt'], 'nothing outside temp is deleted');
+    assert.match(r.message, /Пропущено/);
+  } finally {
+    fsp.lstat = origLstat;
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('clean_temp: Windows\\Temp (any user may create folders there) is cleaned only at its top level', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ginn-clean-sys-'));
+  const sysTemp = path.join(base, 'Windows', 'Temp');
+  const userTemp = path.join(base, 'User', 'Temp');
+  const old = Date.now() / 1000 - 3 * 3600;
+  const mk = (p) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, 'x'); fs.utimesSync(p, old, old); };
+  mk(path.join(sysTemp, 'top.tmp'));
+  mk(path.join(sysTemp, 'someones-dir', 'inner.tmp'));
+  mk(path.join(userTemp, 'mine', 'inner.tmp'));
+  fs.utimesSync(path.join(sysTemp, 'someones-dir'), old, old);
+  fs.utimesSync(path.join(userTemp, 'mine'), old, old);
+  run.setRunner(fakeWindows().runner);
+  const t = tw.createTweaks({
+    platform: 'win32', store: memoryStore(), isAdmin: async () => true,
+    tempRoots: () => [userTemp, sysTemp], env: { SystemRoot: path.join(base, 'Windows') }
+  });
+  await t.apply({ id: 'clean_temp' });
+  assert.ok(!fs.existsSync(path.join(sysTemp, 'top.tmp')), 'top-level file in Windows\\Temp removed');
+  assert.ok(fs.existsSync(path.join(sysTemp, 'someones-dir', 'inner.tmp')), 'folders in Windows\\Temp are not walked');
+  assert.ok(!fs.existsSync(path.join(userTemp, 'mine')), 'the user\'s own temp is still cleaned recursively');
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
+test('elevated as another account: HKCU tweaks are refused and read as unknown, HKLM tweaks and revertAll still work', async () => {
+  const w = fakeWindows({ registry: { [GCS]: { GameDVR_Enabled: ['REG_DWORD', 1] } } });
+  run.setRunner(w.runner);
+  const store = memoryStore();
+  store.data.tweaks.game_mode = { entries: { x: { key: 'HKCU\\Software\\Microsoft\\GameBar', name: 'AutoGameModeEnabled', exists: true, type: 'REG_DWORD', value: 0 } } };
+  const t = tw.createTweaks({ platform: 'win32', store, isAdmin: async () => true, isOtherUser: async () => true, env: {} });
+  const list = await t.list();
+  for (const id of ['game_mode', 'game_dvr_off', 'fso_off', 'mouse_accel_off', 'sticky_keys_off']) {
+    assert.equal(list.find((x) => x.id === id).state, 'unknown', id);
+  }
+  const before = w.calls.length;
+  await assert.rejects(t.apply({ id: 'game_dvr_off', enable: true }), { code: 'UNSUPPORTED', message: /другой учётной записи/ });
+  await assert.rejects(t.apply({ id: 'mouse_accel_off', enable: false }), { code: 'UNSUPPORTED' });
+  assert.ok(!w.calls.slice(before).some(([f, a]) => /reg/i.test(f) && a[0] !== 'query'), 'nothing written');
+  assert.equal(w.getValue(GCS, 'GameDVR_Enabled'), 1);
+  assert.equal(store.data.tweaks.game_dvr_off, undefined, 'no backup taken');
+  // machine-wide tweaks are the same for every account
+  assert.equal((await t.apply({ id: 'hags', enable: true })).state, 'on');
+  // backups this account made earlier are still undone in this account's hive
+  const res = await t.revertAll();
+  assert.ok(res.reverted.includes('game_mode'));
+  assert.equal(w.getValue('HKCU\\Software\\Microsoft\\GameBar', 'AutoGameModeEnabled'), 0);
 });
 
 test('non-Windows: list has unknown states, apply -> UNSUPPORTED', async () => {

@@ -3,6 +3,8 @@
  * Counter-Strike 2 (Steam app 730):
  *   <library>\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\autoexec.cfg — a GinN block with fps_max;
  *   <Steam>\userdata\<id>\730\local\cfg\cs2_video.txt — only keys that already exist are lowered.
+ * Revert (revertText) removes only the GinN block / puts back only those keys: the player's own binds and
+ * aliases in autoexec.cfg and in-game video changes made after the apply stay.
  */
 const path = require('node:path');
 const { HostError } = require('../errors');
@@ -49,17 +51,56 @@ function transformAutoexec(text, opts) {
   return src.replace(/\s*$/, '') + eol + eol + block + eol;
 }
 
+/** autoexec.cfg text without the GinN block (and the blank line GinN put before it); other lines untouched. */
+function removeAutoexecBlock(text) {
+  const src = String(text || '');
+  const b = src.indexOf(BEGIN);
+  const e = b >= 0 ? src.indexOf(END, b) : -1;
+  if (b < 0 || e < 0) return src;
+  const eol = /\r\n/.test(src) ? '\r\n' : '\n';
+  const before = src.slice(0, b).replace(/\s*$/, '');
+  const after = src.slice(e + END.length).replace(/^[ \t]*\r?\n/, '');
+  if (!before) return after;
+  return after.trim() ? before + eol + after : before + eol;
+}
+
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
-/** Edit "key" "value" pairs of cs2_video.txt in place — only keys that are already in the file. */
-function transformVideo(text, preset) {
+function videoRe(k) { return new RegExp('^([ \\t]*"' + escapeRe(k) + '"[ \\t]+")([^"\\r\\n]*)(")', 'mi'); }
+
+/** Set "key" "value" pairs of cs2_video.txt in place — only keys that are already in the file. */
+function setVideo(text, values) {
   let out = String(text || '');
-  const values = VIDEO[preset] || VIDEO.potato;
-  for (const [k, v] of Object.entries(values)) {
-    const re = new RegExp('^([ \\t]*"' + escapeRe(k) + '"[ \\t]+")([^"\\r\\n]*)(")', 'mi');
-    out = out.replace(re, (m, a, old, c) => a + v + c);
-  }
+  for (const [k, v] of Object.entries(values)) out = out.replace(videoRe(k), (m, a, old, c) => a + v + c);
   return out;
+}
+
+function transformVideo(text, preset) {
+  return setVideo(text, VIDEO[preset] || VIDEO.potato);
+}
+
+/** Every key GinN lowers goes back to its value in the pre-GinN copy; nothing else changes. */
+function revertVideo(text, originalText) {
+  const before = {};
+  for (const k of Object.keys(VIDEO.potato)) {
+    const m = videoRe(k).exec(String(originalText || ''));
+    if (m) before[k] = m[2];
+  }
+  return setVideo(text, before);
+}
+
+/**
+ * gamecfg/index.js revert hook -> new text, null = delete the file (GinN created it and only its block
+ * is in it), undefined = restore the whole pre-GinN copy.
+ */
+function revertText(name, current, original) {
+  const n = String(name).toLowerCase();
+  if (n === 'autoexec.cfg') {
+    const out = removeAutoexecBlock(current);
+    return original == null && !out.trim() ? null : out;
+  }
+  if (n === 'cs2_video.txt' && original != null) return revertVideo(current, original);
+  return undefined;
 }
 
 /**
@@ -92,4 +133,4 @@ async function plan(io, opts) {
   return { files, message, processes: ['cs2.exe'] };
 }
 
-module.exports = { plan, transformAutoexec, transformVideo, BEGIN, END, VIDEO };
+module.exports = { plan, transformAutoexec, transformVideo, removeAutoexecBlock, revertVideo, revertText, BEGIN, END, VIDEO };

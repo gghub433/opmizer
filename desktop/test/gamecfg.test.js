@@ -229,3 +229,101 @@ test('profiles: cs2 writes autoexec (created -> deleted on revert) and every cs2
   assert.equal(fs.readFileSync(video, 'utf8'), videoText);
   fs.rmSync(base, { recursive: true, force: true });
 });
+
+test('minecraft: gray pack is put in incompatibleResourcePacks before 1.20.2 (pack_format 34 is "too new" there), not after', () => {
+  const at = (version, inc, extra) => mc.transformOptions('version:' + version + '\nresourcePacks:["vanilla"]\n' +
+    (inc === null ? '' : 'incompatibleResourcePacks:' + inc + '\n') + (extra || ''), { fps: 60, preset: 'potato', grayTextures: true });
+  // 1.20.1 (3465): Minecraft drops the pack on start unless the player's "load anyway" answer is there
+  assert.equal(kv(at(3465, '[]')).incompatibleResourcePacks, '["file/GinN-Gray.zip"]');
+  assert.equal(kv(at(3465, null)).incompatibleResourcePacks, '["file/GinN-Gray.zip"]', 'line added when missing');
+  assert.equal(kv(at(3465, '["file/GinN-Gray.zip"]')).incompatibleResourcePacks, '["file/GinN-Gray.zip"]', 'existing answer kept');
+  assert.equal(kv(at(1976, '["file/Old.zip"]')).incompatibleResourcePacks, '["file/Old.zip","file/GinN-Gray.zip"]');
+  const twice = mc.transformOptions(at(3465, '[]'), { fps: 60, preset: 'potato', grayTextures: true });
+  assert.equal(twice, at(3465, '[]'), 'idempotent');
+  // 1.20.2+ (3578): the pack is compatible; a listed compatible pack is not loaded on that start, so it is un-listed
+  assert.equal(kv(at(3578, '["file/GinN-Gray.zip","file/Old.zip"]')).incompatibleResourcePacks, '["file/Old.zip"]');
+  assert.equal(kv(at(3955, '[]')).incompatibleResourcePacks, '[]');
+  // unknown version: the player's list is left alone
+  const unknown = mc.transformOptions('incompatibleResourcePacks:["file/GinN-Gray.zip"]\n', { fps: 60, preset: 'potato', grayTextures: true });
+  assert.equal(kv(unknown).incompatibleResourcePacks, '["file/GinN-Gray.zip"]');
+  // gray textures switched off: the pack leaves both lists
+  const off = mc.transformOptions(at(3465, '["file/Old.zip"]'), { fps: 60, preset: 'potato', grayTextures: false });
+  assert.equal(kv(off).resourcePacks, '["vanilla"]');
+  assert.equal(kv(off).incompatibleResourcePacks, '["file/Old.zip"]');
+});
+
+test('minecraft: balanced after potato does not keep potato-only values (bobView)', () => {
+  const potato = mc.transformOptions(OPTIONS, { fps: 60, preset: 'potato' });
+  assert.equal(kv(potato).bobView, 'false');
+  const balanced = mc.transformOptions(potato, { fps: 60, preset: 'balanced' });
+  assert.equal(kv(balanced).bobView, 'true');
+  assert.deepEqual(Object.keys(mc.PRESETS.balanced).sort(), Object.keys(mc.PRESETS.potato).sort(), 'both presets set the same keys');
+});
+
+test('cs2 / fortnite / minecraft revert hooks undo only what GinN wrote', () => {
+  // autoexec: block (and GinN's blank line) removed, player lines before and after kept
+  const user = 'bind "F" "+lookatweapon"\r\n';
+  const applied = cs2.transformAutoexec(user, { fps: 240 }) + 'alias "jt" "+jump;-attack"\r\n';
+  assert.equal(cs2.removeAutoexecBlock(applied), user + 'alias "jt" "+jump;-attack"\r\n');
+  assert.equal(cs2.removeAutoexecBlock(cs2.transformAutoexec(user, { fps: 240 })), user);
+  assert.equal(cs2.revertText('autoexec.cfg', cs2.transformAutoexec('', { fps: 60 }), null), null, 'GinN-only file -> delete');
+  assert.equal(cs2.revertText('autoexec.cfg', cs2.transformAutoexec('', { fps: 60 }), ''), '', 'existed empty -> stays, empty');
+  assert.equal(cs2.revertText('autoexec.cfg', 'echo hi\n', null), 'echo hi\n', 'no block -> unchanged');
+  // cs2_video: GinN's keys go back to the copy; a key GinN never touches keeps the value the player set since
+  const video = '"video.cfg"\n{\n\t"setting.msaa_samples"\t\t"8"\n\t"setting.mat_vsync"\t\t"0"\n}\n';
+  const now = cs2.transformVideo(video, 'potato').replace('"setting.mat_vsync"\t\t"0"', '"setting.mat_vsync"\t\t"1"');
+  assert.equal(cs2.revertText('cs2_video.txt', now, video), video.replace('"setting.mat_vsync"\t\t"0"', '"setting.mat_vsync"\t\t"1"'));
+  // fortnite: keys back, keys GinN added removed, a section GinN added dropped, player's later edits kept
+  const ini = '[/Script/FortniteGame.FortGameUserSettings]\r\nFrameRateLimit=60.000000\r\nbShowFPS=False\r\n';
+  const out = fn.transformIni(ini, { fps: 144, preset: 'potato' }).replace('bShowFPS=False', 'bShowFPS=True');
+  assert.equal(fn.revertText('GameUserSettings.ini', out, ini), ini.replace('bShowFPS=False', 'bShowFPS=True'));
+  const sg = '[ScalabilityGroups]\nsg.ShadowQuality=3\nsg.AntiAliasingQuality=3\n';
+  assert.equal(fn.revertIni(fn.transformIni(sg, { fps: 60, preset: 'potato' }), sg), sg);
+  // minecraft: GinN keys back / appended ones removed, keybinds and other settings changed later kept
+  const mcNow = mc.transformOptions(OPTIONS, { fps: 144, preset: 'potato', grayTextures: true })
+    .replace('key_key.jump:key.keyboard.space', 'key_key.jump:key.keyboard.j').replace('lang:ru_ru', 'lang:en_us');
+  assert.equal(mc.revertText('options.txt', mcNow, OPTIONS),
+    OPTIONS.replace('key_key.jump:key.keyboard.space', 'key_key.jump:key.keyboard.j').replace('lang:ru_ru', 'lang:en_us'));
+  assert.equal(mc.revertText('GinN-Gray.zip', 'x', null), undefined, 'the pack itself is restored / deleted whole');
+});
+
+test('profiles: revert keeps what the player changed after the apply (cs2 binds, Minecraft keybinds)', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ginn-revert-'));
+  const steam = path.join(base, 'Steam');
+  const game = path.join(steam, 'steamapps', 'common', 'Counter-Strike Global Offensive');
+  const cfg = path.join(game, 'game', 'csgo', 'cfg');
+  fs.mkdirSync(cfg, { recursive: true });
+  const appdata = path.join(base, 'Roaming');
+  const mcDir = path.join(appdata, '.minecraft');
+  fs.mkdirSync(mcDir, { recursive: true });
+  fs.writeFileSync(path.join(mcDir, 'options.txt'), OPTIONS);
+  const p = createProfiles({
+    platform: 'win32', store: memoryStore(), backupRoot: path.join(base, 'b'), env: { APPDATA: appdata },
+    games: { steamAppDir: async () => ({ root: null, lib: steam, dir: game }) },
+    run: async () => ({ code: 0, stdout: 'INFO: none', stderr: '' })
+  });
+  // CS2: autoexec.cfg did not exist; the player adds binds to the file GinN created
+  await p.apply({ gameId: 'cs2', fps: 240, preset: 'potato' });
+  const autoexec = path.join(cfg, 'autoexec.cfg');
+  fs.appendFileSync(autoexec, 'bind "mouse4" "+voicerecord"\n');
+  await p.revert({ gameId: 'cs2' });
+  assert.equal(fs.readFileSync(autoexec, 'utf8'), 'bind "mouse4" "+voicerecord"\n', 'binds kept, GinN block gone');
+  // second round: autoexec exists now -> block removed again, later lines kept
+  await p.apply({ gameId: 'cs2', fps: 144, preset: 'potato' });
+  fs.appendFileSync(autoexec, 'sensitivity 1.1\n');
+  await p.revert({ gameId: 'cs2' });
+  assert.equal(fs.readFileSync(autoexec, 'utf8'), 'bind "mouse4" "+voicerecord"\nsensitivity 1.1\n');
+  // Minecraft: the player rebinds a key in game after the apply
+  const opt = path.join(mcDir, 'options.txt');
+  await p.apply({ gameId: 'minecraft', fps: 144, preset: 'potato', grayTextures: true });
+  fs.writeFileSync(opt, fs.readFileSync(opt, 'utf8').replace('key_key.jump:key.keyboard.space', 'key_key.jump:key.keyboard.j'));
+  await p.revert({ gameId: 'minecraft' });
+  assert.equal(fs.readFileSync(opt, 'utf8'), OPTIONS.replace('key_key.jump:key.keyboard.space', 'key_key.jump:key.keyboard.j'));
+  assert.ok(!fs.existsSync(path.join(mcDir, 'resourcepacks', 'GinN-Gray.zip')));
+  // a config the player deleted since comes back from the copy whole
+  await p.apply({ gameId: 'minecraft', fps: 60, preset: 'balanced', grayTextures: false });
+  fs.unlinkSync(opt);
+  await p.revert({ gameId: 'minecraft' });
+  assert.equal(fs.readFileSync(opt, 'utf8'), OPTIONS.replace('key_key.jump:key.keyboard.space', 'key_key.jump:key.keyboard.j'));
+  fs.rmSync(base, { recursive: true, force: true });
+});

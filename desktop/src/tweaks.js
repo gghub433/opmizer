@@ -27,6 +27,8 @@ const DW = 'REG_DWORD';
 const SZ = 'REG_SZ';
 
 const NEEDS_ADMIN_MSG = 'Нужны права администратора — перезапусти GinN от имени администратора';
+const OTHER_USER_MSG = 'GinN открыт от имени другой учётной записи (администратора) — эта настройка поменялась бы у неё, ' +
+  'а не у тебя. Включи её в GinN, открытом обычным способом';
 
 /* ------------------------------------------------------------- power plan */
 
@@ -222,7 +224,8 @@ function sameValue(type, a, b) {
 }
 
 /**
- * @param {object} deps {platform, reg, run, ps, isAdmin():Promise<bool>, store, openExternal(url), env, tempRoots?, now?}
+ * @param {object} deps {platform, reg, run, ps, isAdmin():Promise<bool>, isOtherUser():Promise<bool>, store,
+ *                       openExternal(url), env, tempRoots?, now?}
  */
 function createTweaks(deps) {
   const platform = deps.platform || process.platform;
@@ -232,6 +235,8 @@ function createTweaks(deps) {
   const store = deps.store;
   const env = deps.env || process.env;
   const isAdmin = deps.isAdmin || (async () => false);
+  // Elevated as another account: HKCU is that account's hive, not the signed-in user's (see admin.isOtherUser).
+  const isOtherUser = deps.isOtherUser || (async () => false);
   const now = deps.now || (() => Date.now());
 
   /** Per-call cache of whole registry keys: one reg.exe per key instead of one per value. */
@@ -278,6 +283,10 @@ function createTweaks(deps) {
 
   function needsAdminFor(def, entries) {
     return def.admin || entries.some((e) => reg.isMachineKey(e.key));
+  }
+
+  function userHive(entries) {
+    return entries.some((e) => /^HKCU(\\|$)/.test(reg.normKey(e.key)));
   }
 
   async function registryState(def, cache) {
@@ -447,6 +456,7 @@ function createTweaks(deps) {
   async function registryToggle(def, enable) {
     const entries = await entriesOf(def);
     if (needsAdminFor(def, entries) && !(await isAdmin())) throw new HostError('NEEDS_ADMIN', NEEDS_ADMIN_MSG);
+    if (userHive(entries) && await isOtherUser()) throw new HostError('UNSUPPORTED', OTHER_USER_MSG);
     if (enable) {
       if (!entries.length) throw new HostError('NOT_FOUND', 'Не нашёл активных сетевых адаптеров');
       const snap = await snapshotEntries(entries);
@@ -457,8 +467,11 @@ function createTweaks(deps) {
       for (const e of entries) await writeEntry(e, e.on);
     } else {
       await restoreBackup(def.id);
-      // The backup may have been taken while the tweak was already on — then fall back to Windows defaults.
+      // Still on: it was on before GinN (no backup, or the backup was taken while it was on). Fall back to
+      // Windows defaults, but keep the current values first so «Откатить» can bring the user's setting back.
       if (await registryState(def, makeCache()) === 'on') {
+        const snap = await snapshotEntries(entries);
+        store.update((d) => { d.tweaks[def.id] = { entries: snap }; });
         for (const e of entries) await writeEntry(e, e.off);
       }
     }
@@ -498,8 +511,23 @@ function createTweaks(deps) {
     return b.startsWith(a.endsWith(path.sep) ? a : a + path.sep);
   }
 
-  async function cleanRoot(root, cutoff, acc) {
+  /**
+   * `dir` (built from a real root plus names lstat'ed as plain folders) must still resolve to itself.
+   * Checked right before every readdir / unlink / rmdir: a folder swapped for a junction or symlink after
+   * its lstat would otherwise send the deletes below it outside temp (with admin rights when elevated).
+   */
+  function unmoved(dir) {
+    const fold = (p) => (platform === 'win32' ? p.toLowerCase() : p);
+    try { return fold(fs.realpathSync(dir)) === fold(dir); } catch (e) { return false; }
+  }
+
+  /**
+   * shallow: only files directly in the root. Used for Windows\Temp, where every user may create folders,
+   * so nothing below it can be trusted to stay a real folder while an elevated GinN walks it.
+   */
+  async function cleanRoot(root, cutoff, acc, shallow) {
     async function walk(dir) {
+      if (!unmoved(dir)) { acc.skipped++; return false; }
       let list;
       try { list = await fsp.readdir(dir); } catch (e) { acc.skipped++; return false; }
       let empty = true;
@@ -510,13 +538,16 @@ function createTweaks(deps) {
         try { st = await fsp.lstat(p); } catch (e) { empty = false; acc.skipped++; continue; }
         if (st.isSymbolicLink()) { empty = false; acc.skipped++; continue; } // never follow links/junctions
         if (st.isDirectory()) {
+          if (shallow) { empty = false; continue; }
           const sub = await walk(p);
-          if (sub && st.mtimeMs < cutoff) {
-            try { await fsp.rmdir(p); } catch (e) { empty = false; }
+          if (sub && st.mtimeMs < cutoff && unmoved(dir)) {
+            try { fs.rmdirSync(p); } catch (e) { empty = false; }
           } else empty = false;
         } else {
           if (st.mtimeMs >= cutoff) { empty = false; acc.skipped++; continue; }
-          try { await fsp.unlink(p); acc.freed += st.size; acc.removed++; } catch (e) { empty = false; acc.skipped++; }
+          if (!unmoved(dir)) { empty = false; acc.skipped++; continue; }
+          // Synchronous right after the check: no other work can run between the two.
+          try { fs.unlinkSync(p); acc.freed += st.size; acc.removed++; } catch (e) { empty = false; acc.skipped++; }
         }
       }
       return empty;
@@ -533,9 +564,10 @@ function createTweaks(deps) {
       if (s && !seen.has(s.toLowerCase())) { seen.add(s.toLowerCase()); roots.push(s); }
     }
     if (!roots.length) throw new HostError('NOT_FOUND', 'Не нашёл папку временных файлов');
+    const shared = env.SystemRoot ? safeRoot(path.join(env.SystemRoot, 'Temp')) : null;
     const acc = { freed: 0, removed: 0, skipped: 0 };
     const cutoff = now() - 60 * 60 * 1000; // files touched in the last hour may still be in use
-    for (const r of roots) await cleanRoot(r, cutoff, acc);
+    for (const r of roots) await cleanRoot(r, cutoff, acc, !!shared && r.toLowerCase() === shared.toLowerCase());
     const mb = Math.round(acc.freed / (1024 * 1024));
     let message = acc.removed ? 'Освобождено ' + mb + ' МБ' : 'Удалять нечего — временные файлы уже чистые';
     if (acc.skipped) message += '. Пропущено занятых или свежих: ' + acc.skipped;
@@ -570,12 +602,14 @@ function createTweaks(deps) {
   async function list() {
     if (platform !== 'win32') return DEFS.map((d) => publicTweak(d, 'unknown'));
     const cache = makeCache();
+    const other = isOtherUser().catch(() => false);
     return Promise.all(DEFS.map(async (d) => {
       let state = 'unknown';
       try {
         if (d.kind === 'action') state = 'off';
         else if (d.kind === 'link') state = 'unknown';
         else if (d.custom === 'power') state = await powerState();
+        else if (userHive(d.entries || []) && await other) state = 'unknown'; // another account's settings
         else state = await registryState(d, cache);
       } catch (e) { state = 'unknown'; }
       return publicTweak(d, state);

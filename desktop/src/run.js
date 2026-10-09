@@ -74,9 +74,12 @@ function run(file, args, opts) {
     .catch((e) => ({ code: -1, stdout: '', stderr: String((e && e.message) || e), timedOut: false }));
 }
 
-/** PowerShell single-quoted literal. */
+/**
+ * PowerShell single-quoted literal. PowerShell also ends such a string at the typographic quotes
+ * U+2018 ‘ U+2019 ’ U+201A ‚ U+201B ‛ (a path like D:\Ivan’s Games), so every one of them is doubled too.
+ */
 function psQuote(s) {
-  return "'" + String(s == null ? '' : s).replace(/'/g, "''") + "'";
+  return "'" + String(s == null ? '' : s).replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&') + "'";
 }
 
 /**

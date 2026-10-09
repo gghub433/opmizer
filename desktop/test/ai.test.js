@@ -385,6 +385,28 @@ test('default client: real SDK constructor, baseURL pinned even when ANTHROPIC_B
   fs.rmSync(t.dir, { recursive: true, force: true });
 });
 
+test('ANTHROPIC_CUSTOM_HEADERS in the environment never reaches a request (it could replace x-api-key)', async () => {
+  const t = tmpStore();
+  const seen = [];
+  const stubFetch = async (url, init) => {
+    const h = {};
+    new Headers(init.headers).forEach((v, k) => { h[k] = v; });
+    seen.push(h);
+    return new Response(JSON.stringify(message()), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const env = 'x-api-key: sk-ant-from-env-0000000000000000\nX-Leak: secret-env-value';
+  await withEnv({ ANTHROPIC_CUSTOM_HEADERS: env }, async () => {
+    const a = ai.createAi({ store: t.store, safeStorage: fakeSafeStorage(), fetch: stubFetch, sdk: Anthropic });
+    await a.aiConfigure({ key: KEY });
+    await a.aiMessage({ params: planRequest() });
+    assert.equal(process.env.ANTHROPIC_CUSTOM_HEADERS, env, 'the variable is back for everyone else');
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]['x-api-key'], KEY);
+  assert.equal(seen[0]['x-leak'], undefined);
+  fs.rmSync(t.dir, { recursive: true, force: true });
+});
+
 /* ------------------------------------------------------------ error mapping */
 
 const H = () => new Headers({ 'request-id': 'req_test_1', 'content-type': 'application/json' });

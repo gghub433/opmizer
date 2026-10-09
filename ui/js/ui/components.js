@@ -141,7 +141,8 @@ window.GinN = window.GinN || {};
       }
     };
     el.isBusy = function () { return busyFlag; };
-    el.setLabel = function (t) { lbl.textContent = t; };
+    // while a busy label is shown, keep the new label for busy(false) to put back
+    el.setLabel = function (t) { if (busyFlag && el._prev != null) el._prev = t; else lbl.textContent = t; };
     if (o.onClick) {
       el.addEventListener('click', function (ev) {
         if (busyFlag) return;

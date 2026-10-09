@@ -54,6 +54,22 @@ function isPlainObject(x) {
 
 function badParams(detail) { return new HostError('BAD_ARGS', MSG.PARAMS_BAD, detail); }
 
+const ENV_HEADERS = 'ANTHROPIC_CUSTOM_HEADERS';
+
+/**
+ * Runs fn() with ANTHROPIC_CUSTOM_HEADERS hidden from process.env. The SDK constructor merges that variable
+ * into the headers of every request, after the auth header — a value left by a developer tool or proxy setup
+ * would add headers or even replace the user's x-api-key. It is read only in the constructor, and fn is
+ * synchronous, so nothing else ever sees the variable missing.
+ */
+function withoutEnvHeaders(fn) {
+  const env = process.env;
+  const saved = env[ENV_HEADERS];
+  if (saved === undefined) return fn();
+  delete env[ENV_HEADERS];
+  try { return fn(); } finally { env[ENV_HEADERS] = saved; }
+}
+
 /**
  * Checks a Messages API body coming from the page. Returns it unchanged or throws BAD_ARGS.
  * Only the keys GinN.ai builds are allowed: nothing like stream, tools, thinking or sampling knobs.
@@ -241,10 +257,11 @@ function createAi(deps) {
     let client;
     try {
       // authToken:null keeps a stray ANTHROPIC_AUTH_TOKEN in the environment from riding along;
-      // logLevel 'off' keeps request logging (ANTHROPIC_LOG) out of the console.
+      // logLevel 'off' keeps request logging (ANTHROPIC_LOG) out of the console; ANTHROPIC_CUSTOM_HEADERS
+      // is hidden while the client is built (withoutEnvHeaders).
       const options = Object.assign({ apiKey, authToken: null, logLevel: 'off' }, CLIENT_OPTIONS);
       if (fetchImpl) options.fetch = fetchImpl;
-      client = createClient(options);
+      client = withoutEnvHeaders(() => createClient(options));
     } catch (e) {
       const m = mapSdkError(e, sdk());
       if (m) throw new HostError(m.code, m.message, errorDetail(e));

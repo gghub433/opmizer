@@ -21,6 +21,8 @@ jobs:
   android:
     name: Android APK
     runs-on: ubuntu-latest
+    env:
+      GINN_KEYSTORE_B64: ${{ secrets.GINN_KEYSTORE_B64 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,11 +35,31 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build debug APK
-        run: gradle -p android assembleDebug --no-daemon
+      # Optional stable signing key: add secrets GINN_KEYSTORE_B64 (base64 of the .jks), GINN_KEYSTORE_PASSWORD,
+      # GINN_KEY_ALIAS, GINN_KEY_PASSWORD. Without them the release APK is signed with the runner's debug key.
+      - name: Decode signing key
+        if: env.GINN_KEYSTORE_B64 != ''
+        run: |
+          echo "$GINN_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/ginn-release.jks"
+          echo "GINN_KEYSTORE=$RUNNER_TEMP/ginn-release.jks" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        run: gradle -p android assembleRelease --no-daemon
+        env:
+          GINN_KEYSTORE_PASSWORD: ${{ secrets.GINN_KEYSTORE_PASSWORD }}
+          GINN_KEY_ALIAS: ${{ secrets.GINN_KEY_ALIAS }}
+          GINN_KEY_PASSWORD: ${{ secrets.GINN_KEY_PASSWORD }}
 
       - name: Rename APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk GinN.apk
+        run: cp android/app/build/outputs/apk/release/app-release.apk GinN.apk
+
+      - name: Check APK is not debuggable
+        run: |
+          AAPT2="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/aapt2"
+          "$AAPT2" dump badging GinN.apk | grep -E "^package:|application-label:"
+          if "$AAPT2" dump badging GinN.apk | grep -q "application-debuggable"; then
+            echo "::error::GinN.apk is debuggable"; exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

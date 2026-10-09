@@ -2,6 +2,8 @@
 /**
  * Minecraft: Java Edition — %APPDATA%\.minecraft\options.txt (+ optional gray resource pack).
  * options.txt is "key:value" per line; unknown keys are ignored by the game, so missing keys are appended.
+ * Revert (revertText) puts back only the keys GinN writes; keybinds and everything else the player changed
+ * after the apply stay as they are.
  */
 const path = require('node:path');
 const png = require('../png');
@@ -11,6 +13,9 @@ const { HostError } = require('../errors');
 const PACK_FILE = 'GinN-Gray.zip';
 const PACK_ID = 'file/' + PACK_FILE;
 const MAX_FPS_SLIDER = 260; // 260 = "Unlimited" in the video settings
+// Data version (options.txt "version:") of 1.20.2, the first release that reads `supported_formats`.
+// Older versions compare pack_format 34 with their own format only and call the pack "too new".
+const SUPPORTED_FORMATS_SINCE = 3578;
 
 const PRESETS = {
   potato: {
@@ -21,9 +26,12 @@ const PRESETS = {
   balanced: {
     renderDistance: '8', simulationDistance: '8', graphicsMode: '1', ao: true, renderClouds: '"fast"',
     particles: '1', entityShadows: 'true', entityDistanceScaling: '0.75', biomeBlendRadius: '1',
-    mipmapLevels: '2', enableVsync: 'false'
+    mipmapLevels: '2', enableVsync: 'false', bobView: 'true'
   }
 };
+
+// Every options.txt key GinN may write (resourcePacks / incompatibleResourcePacks are handled per entry).
+const MANAGED_KEYS = [...new Set(['maxFps', 'fancyGraphics', ...Object.keys(PRESETS.potato), ...Object.keys(PRESETS.balanced)])];
 
 function parseList(value) {
   try {
@@ -32,52 +40,98 @@ function parseList(value) {
   } catch (e) { return null; }
 }
 
+/** options.txt text -> {get(k), has(k), put(k, v), remove(k), text()}; the first line of a key wins, order and EOLs kept. */
+function optionsDoc(text) {
+  const src = String(text || '');
+  const eol = /\r\n/.test(src) ? '\r\n' : '\n';
+  const lines = src.split(/\r?\n/);
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const find = (k) => lines.findIndex((l) => l.indexOf(':') === k.length && l.startsWith(k));
+  return {
+    get(k) { const i = find(k); return i < 0 ? null : lines[i].slice(k.length + 1); },
+    has(k) { return find(k) >= 0; },
+    put(k, v) { const i = find(k); if (i >= 0) lines[i] = k + ':' + v; else lines.push(k + ':' + v); },
+    remove(k) { const i = find(k); if (i >= 0) lines.splice(i, 1); },
+    text() { return lines.join(eol) + eol; }
+  };
+}
+
 /**
  * transformOptions(text, {fps, preset, grayTextures}) -> new options.txt text. Idempotent.
  * Existing keys are edited in place (order and every other line preserved), missing keys are appended.
  */
 function transformOptions(text, opts) {
   const preset = PRESETS[opts.preset] || PRESETS.potato;
-  const eol = /\r\n/.test(text) ? '\r\n' : '\n';
-  const lines = String(text || '').split(/\r?\n/);
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  const index = new Map();
-  lines.forEach((l, i) => {
-    const c = l.indexOf(':');
-    if (c > 0 && !index.has(l.slice(0, c))) index.set(l.slice(0, c), i);
-  });
-  const current = (k) => (index.has(k) ? lines[index.get(k)].slice(k.length + 1) : null);
-  const put = (k, v) => {
-    if (index.has(k)) lines[index.get(k)] = k + ':' + v;
-    else { index.set(k, lines.length); lines.push(k + ':' + v); }
-  };
+  const doc = optionsDoc(text);
 
   for (const [k, v] of Object.entries(preset)) {
     if (k === 'ao') {
       // Before 1.19 "ao" was a level 0..2, newer versions use true/false — keep the file's own style.
-      const cur = current('ao');
-      put('ao', cur !== null && /^\d+$/.test(cur.trim()) ? (v ? '2' : '0') : String(v));
-    } else if (k === 'graphicsMode' && !index.has('graphicsMode') && index.has('fancyGraphics')) {
-      put('fancyGraphics', v === '0' ? 'false' : 'true'); // 1.15 and older
+      const cur = doc.get('ao');
+      doc.put('ao', cur !== null && /^\d+$/.test(cur.trim()) ? (v ? '2' : '0') : String(v));
+    } else if (k === 'graphicsMode' && !doc.has('graphicsMode') && doc.has('fancyGraphics')) {
+      doc.put('fancyGraphics', v === '0' ? 'false' : 'true'); // 1.15 and older
     } else {
-      put(k, v);
+      doc.put(k, v);
     }
   }
   const fps = Math.max(10, Math.min(MAX_FPS_SLIDER, Math.round(Number(opts.fps) || 60)));
-  put('maxFps', String(fps));
+  doc.put('maxFps', String(fps));
 
-  const cur = current('resourcePacks');
+  const cur = doc.get('resourcePacks');
   let packs = cur === null ? [] : (parseList(cur) || []);
   const had = packs.includes(PACK_ID);
   if (opts.grayTextures && !had) packs.push(PACK_ID);       // last = highest priority
   if (!opts.grayTextures && had) packs = packs.filter((p) => p !== PACK_ID);
-  if (opts.grayTextures || had) put('resourcePacks', JSON.stringify(packs));
-  const inc = current('incompatibleResourcePacks');
-  if (inc !== null && opts.grayTextures) {
-    const list = parseList(inc);
-    if (list && list.includes(PACK_ID)) put('incompatibleResourcePacks', JSON.stringify(list.filter((p) => p !== PACK_ID)));
+  if (opts.grayTextures || had) doc.put('resourcePacks', JSON.stringify(packs));
+
+  // incompatibleResourcePacks holds the player's "load it anyway" answers. Before 1.20.2 the gray pack is
+  // "too new" and Minecraft drops it from resourcePacks on start unless it is listed there, so GinN lists it.
+  // From 1.20.2 it is compatible, and Minecraft does not load a compatible pack that is still listed on that
+  // start (it only un-lists it), so there it must not be listed. Unknown version: the list is left alone.
+  const inc = doc.get('incompatibleResourcePacks');
+  const list = inc === null ? [] : parseList(inc);
+  if (list) {
+    const version = parseInt(doc.get('version'), 10);
+    const listed = list.includes(PACK_ID);
+    let want = listed;
+    if (opts.grayTextures && Number.isFinite(version)) want = version < SUPPORTED_FORMATS_SINCE;
+    else if (!opts.grayTextures && had) want = false; // the pack leaves resourcePacks, its answer goes too
+    if (want !== listed) {
+      doc.put('incompatibleResourcePacks', JSON.stringify(want ? list.concat(PACK_ID) : list.filter((p) => p !== PACK_ID)));
+    }
   }
-  return lines.join(eol) + eol;
+  return doc.text();
+}
+
+/**
+ * Undo GinN's part of options.txt: every key GinN writes goes back to its value in the pre-GinN copy
+ * (or is removed when that copy did not have it), the gray pack leaves both pack lists unless it was
+ * there before. Everything else in the current file (keybinds, settings changed in game) stays.
+ */
+function revertOptions(text, originalText) {
+  const cur = optionsDoc(text);
+  const orig = optionsDoc(originalText);
+  for (const k of MANAGED_KEYS) {
+    const was = orig.get(k);
+    if (was === null) cur.remove(k);
+    else if (cur.has(k)) cur.put(k, was);
+  }
+  for (const k of ['resourcePacks', 'incompatibleResourcePacks']) {
+    const list = cur.get(k) === null ? null : parseList(cur.get(k));
+    const before = orig.get(k);
+    if (!list || !list.includes(PACK_ID) || (before !== null && (parseList(before) || []).includes(PACK_ID))) continue;
+    const rest = list.filter((p) => p !== PACK_ID);
+    if (before === null && !rest.length) cur.remove(k);
+    else cur.put(k, JSON.stringify(rest));
+  }
+  return cur.text();
+}
+
+/** gamecfg/index.js revert hook: new text, or undefined = restore the whole pre-GinN copy (the pack zip). */
+function revertText(name, current, original) {
+  if (String(name).toLowerCase() !== 'options.txt' || original == null) return undefined;
+  return revertOptions(current, original);
 }
 
 /* ----------------------------------------------------------- gray pack */
@@ -173,4 +227,6 @@ async function plan(io, opts) {
   return { files, message };
 }
 
-module.exports = { plan, transformOptions, buildGrayPack, PACK_FILE, PACK_ID, GRAY, PRESETS };
+module.exports = {
+  plan, transformOptions, revertOptions, revertText, buildGrayPack, PACK_FILE, PACK_ID, GRAY, PRESETS, SUPPORTED_FORMATS_SINCE
+};

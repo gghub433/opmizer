@@ -2,6 +2,7 @@
 /**
  * Elevation helpers.
  *   isAdmin()            -> Promise<bool> (cached; always false off Windows)
+ *   isOtherUser()        -> Promise<bool> (cached) elevated as a different account than the signed-in user
  *   relaunchAsAdmin(app) -> starts an elevated copy through UAC and quits this one
  */
 const { run, ps, psQuote } = require('./run');
@@ -26,7 +27,40 @@ function isAdmin(platform) {
   return cached;
 }
 
-function resetCache() { cached = null; }
+/**
+ * A standard user who elevates types an administrator's password into UAC: the elevated GinN then runs as
+ * that administrator, so HKCU (and %APPDATA%) belong to them, not to the person at the keyboard.
+ * The person signed in to this Windows session is the owner of the session's shell (explorer.exe).
+ */
+const OTHER_USER_SCRIPT = "Write-Output ('GINN_ME ' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value); " +
+  '$s=(Get-Process -Id $PID).SessionId; ' +
+  "$e=Get-CimInstance Win32_Process -Filter \"Name='explorer.exe' AND SessionId=$s\" -ErrorAction SilentlyContinue | " +
+  'Sort-Object CreationDate | Select-Object -First 1; ' +
+  'if ($e) { $o=Invoke-CimMethod -InputObject $e -MethodName GetOwnerSid -ErrorAction SilentlyContinue; ' +
+  "if ($o -and $o.Sid) { Write-Output ('GINN_SHELL ' + $o.Sid) } }";
+
+/** Script output -> true only when both SIDs are known and differ (no shell found = assume the same user). */
+function parseOtherUser(out) {
+  const me = /GINN_ME (S-[\d-]+)/i.exec(out || '');
+  const shell = /GINN_SHELL (S-[\d-]+)/i.exec(out || '');
+  return !!(me && shell && me[1].toUpperCase() !== shell[1].toUpperCase());
+}
+
+let otherCached = null;
+
+function isOtherUser(platform) {
+  const plat = platform || process.platform;
+  if (!otherCached) {
+    otherCached = (async () => {
+      if (plat !== 'win32' || !(await isAdmin(plat))) return false; // without elevation it is the user's own token
+      const r = await ps(OTHER_USER_SCRIPT, { timeout: 20000 });
+      return r.code === 0 && parseOtherUser(r.stdout);
+    })().catch(() => false);
+  }
+  return otherCached;
+}
+
+function resetCache() { cached = null; otherCached = null; }
 
 /** Build the PowerShell that starts `exe args` elevated and prints GINN_OK / GINN_CANCELLED / GINN_ERR:… */
 function relaunchScript(exe, args) {
@@ -66,4 +100,4 @@ async function relaunchAsAdmin(o) {
   throw new HostError('FAILED', 'Не удалось перезапустить GinN от имени администратора', out + r.stderr);
 }
 
-module.exports = { isAdmin, resetCache, relaunchAsAdmin, relaunchScript };
+module.exports = { isAdmin, isOtherUser, parseOtherUser, resetCache, relaunchAsAdmin, relaunchScript, OTHER_USER_SCRIPT };

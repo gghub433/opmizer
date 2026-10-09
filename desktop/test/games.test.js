@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vdf = require('../src/vdf');
 const games = require('../src/games');
+const run = require('../src/run');
 
 const LIBRARY_NEW = `"libraryfolders"
 {
@@ -173,6 +174,48 @@ test('detect(): Steam libraries + Epic + Minecraft + Valorant + Roblox from a fa
   await assert.rejects(g.launch({ id: 'steam:1' }), { code: 'NOT_FOUND' });
   const dir = await g.steamAppDir(730);
   assert.equal(dir.dir, path.join(steam, 'steamapps', 'common', 'Counter-Strike Global Offensive'));
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
+test('boost script quotes typographic apostrophes in install paths (PowerShell ends a literal at them)', () => {
+  const s = games.boostScript({ dirs: ['D:\\Ivan\u2019s Games\\X'], names: ['a\u2018b'], title: 'T\u201B' });
+  assert.ok(s.includes("$dirs=@('D:\\Ivan\u2019\u2019s Games\\X\\')"));
+  assert.ok(s.includes("$names=@('a\u2018\u2018b')"));
+  assert.ok(s.includes("$title='T\u201B\u201B'"));
+});
+
+test('VALORANT: only a Riot-signed RiotClientServices.exe is started; other exes in RiotClientInstalls.json are ignored', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ginn-riot-'));
+  const w = (p, s) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, s); };
+  const pd = path.join(base, 'ProgramData');
+  const drive = path.join(base, 'C');
+  const valDir = path.join(drive, 'Riot Games', 'VALORANT');
+  // the default path games.js builds from SystemDrive + '\\' (off Windows: a folder literally named `C\`)
+  const real = path.join(drive + '\\', 'Riot Games', 'Riot Client', 'RiotClientServices.exe');
+  const evil = path.join(base, 'Public', 'payload.exe');
+  fs.mkdirSync(path.join(valDir, 'live'), { recursive: true });
+  w(real, 'MZ');
+  w(evil, 'MZ');
+  w(path.join(pd, 'Riot Games', 'RiotClientInstalls.json'), JSON.stringify({
+    associated_client: { [valDir.replace(/\\/g, '/') + '/live/']: evil }, rc_default: evil
+  }));
+  const spawned = [];
+  const scripts = [];
+  let signed = true;
+  const g = games.createGames({
+    platform: 'win32', reg: { query: async () => ({ exists: false }) },
+    env: { ProgramData: pd, SystemDrive: drive, 'ProgramFiles(x86)': path.join(base, 'pf86') },
+    openUrl: async () => {}, spawnDetached: async (f, a) => { spawned.push([f, a]); },
+    ps: async (script) => { scripts.push(script); return { code: 0, stdout: signed ? 'GINN_SIGNED\r\n' : '' }; }
+  });
+  assert.deepEqual((await g.detect()).map((x) => x.id), ['riot:valorant']);
+  await g.launch({ id: 'riot:valorant' });
+  assert.deepEqual(spawned, [[real, ['--launch-product=valorant', '--launch-patchline=live']]], 'payload.exe never started');
+  assert.ok(scripts[0].includes('Get-AuthenticodeSignature -LiteralPath ' + run.psQuote(real)));
+  assert.match(scripts[0], /Riot Games/);
+  signed = false; // e.g. a planted RiotClientServices.exe
+  await assert.rejects(g.launch({ id: 'riot:valorant' }), { code: 'FAILED', message: /подписи/ });
+  assert.equal(spawned.length, 1);
   fs.rmSync(base, { recursive: true, force: true });
 });
 

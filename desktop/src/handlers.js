@@ -59,6 +59,7 @@ function createHandlers(deps) {
   const win = platform === 'win32';
   const store = createStore(path.join(deps.userData, 'ginn-state.json'));
   const isAdmin = () => admin.isAdmin(platform);
+  const isOtherUser = () => admin.isOtherUser(platform);
   const session = win ? new PsSession() : null;
   const openUrl = (url) => Promise.resolve(deps.shell.openExternal(url));
 
@@ -77,7 +78,7 @@ function createHandlers(deps) {
       };
     }
   });
-  const tweaks = createTweaks({ platform, store, isAdmin, openExternal: openUrl });
+  const tweaks = createTweaks({ platform, store, isAdmin, isOtherUser, openExternal: openUrl });
   const games = createGames({ platform, openUrl, emit: deps.emit });
   const profiles = createProfiles({ platform, store, games, backupRoot: path.join(deps.userData, 'backups') });
   const ai = createAi({

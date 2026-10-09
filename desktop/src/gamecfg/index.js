@@ -3,7 +3,11 @@
  * Game profiles: applyGameProfile / revertGameProfile.
  * `gameId` is the UI CATALOG id ('minecraft' | 'cs2' | 'fortnite'), not an InstalledGame id.
  * Before the first write of each file the original is copied to <userData>/backups/<gameId>/
- * (an existing backup is never overwritten); files that did not exist are deleted on revert.
+ * (an existing backup is never overwritten).
+ * Revert undoes only GinN's part of a config the game module understands (module.revertText): the keys or
+ * the block GinN writes go back to the copy, everything the player changed since stays. Other files (the
+ * gray pack), and configs the player deleted since, come back from the copy whole; files that did not exist
+ * before are deleted.
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -98,6 +102,30 @@ function createProfiles(deps) {
     return { written, message: p.message };
   }
 
+  /** Undo one file. A file that exists but cannot be read throws, it is never replaced blindly. */
+  function revertFile(mod, dir, f) {
+    const backup = f.backup ? path.join(dir, f.backup) : null;
+    const current = io.exists(f.path) ? xfs.readFileSync(f.path, 'utf8') : null;
+    let out;
+    if (current != null && mod.revertText) {
+      out = mod.revertText(path.basename(f.path), current, backup ? xfs.readFileSync(backup, 'utf8') : null);
+    }
+    if (out === undefined) {
+      if (backup) {
+        xfs.mkdirSync(path.dirname(f.path), { recursive: true });
+        xfs.copyFileSync(backup, f.path);
+      } else {
+        try { xfs.unlinkSync(f.path); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      }
+    } else if (out === null) {
+      try { xfs.unlinkSync(f.path); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    } else if (out !== current) {
+      const tmp = f.path + '.ginn-tmp';
+      xfs.writeFileSync(tmp, out);
+      xfs.renameSync(tmp, f.path);
+    }
+  }
+
   async function revert(args) {
     if (platform !== 'win32') throw unsupported();
     const gameId = String((args && args.gameId) || '');
@@ -107,14 +135,7 @@ function createProfiles(deps) {
       throw new HostError('NOT_FOUND', 'GinN ещё не менял настройки этой игры');
     }
     const dir = saved.dir || path.join(deps.backupRoot, gameId);
-    for (const f of saved.files) {
-      if (f.backup) {
-        xfs.mkdirSync(path.dirname(f.path), { recursive: true });
-        xfs.copyFileSync(path.join(dir, f.backup), f.path);
-      } else {
-        try { xfs.unlinkSync(f.path); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-      }
-    }
+    for (const f of saved.files) revertFile(MODULES[gameId], dir, f);
     try { xfs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* leftovers are harmless */ }
     store.update((d) => { delete d.games[gameId]; });
     return { message: 'Настройки игры возвращены как были' };
