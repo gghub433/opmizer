@@ -92,6 +92,7 @@ Back button: Java evaluates `window.__ginnBack && window.__ginnBack()`; result `
 | `aiClear` | – | same as `aiStatus` (forgets the key) |
 | `aiKey` | – | `{key}` — **only** hosts with `transport:'page'` (Android, browser); desktop rejects with `UNSUPPORTED` |
 | `aiMessage` | `{params}` (Messages API request body built by `GinN.ai`) | the raw Message object — **only** desktop (`transport:'native'`, Electron main uses `@anthropic-ai/sdk`) |
+| `readText` | – | `{text}` — current clipboard text (used to paste Claude's answer in the «via Claude app» mode; may be `''`) |
 
 Capabilities strings: `tweaks`, `games.detect`, `games.launch`, `games.profile` (PC writes game configs),
 `boost` (Android RAM boost), `dnd`, `saveFile`, `admin` (Windows elevation available), `ai` (all hosts),
@@ -129,6 +130,23 @@ tweak ids, `gameId` enum = catalog ids for the platform or null):
 `GinN.ai.apply(plan, {onStep})` applies chosen steps with the same rules as "Optimize all".
 `GinN.ai.ask(history, question)` — follow-up chat (plain text answer, same context in the system prompt).
 `GinN.ai.localPlan()` — offline rules-based plan (labelled «Базовый анализ без ИИ», never presented as AI).
+### Mode «Через приложение Claude» (no API key — works with a free or Pro claude.ai account)
+
+Anthropic does not let third-party apps sign in with claude.ai accounts or use a Claude Free/Pro subscription, so
+GinN never asks for claude.ai credentials. Instead it hands the request to the official Claude app/website:
+1. `GinN.ai.handoff({goal, gameId, fps, note, context?})` → `{prompt, url}`: a self-contained Russian prompt (rules, the
+   device context as compact JSON, the allowed tweak ids, and the exact answer format: a short explanation followed by
+   ONE fenced ```json block with the PLAN fields) and `url = 'https://claude.ai/new?q=' + encodeURIComponent(prompt)`
+   (omitted/plain `https://claude.ai/new` when the prompt is longer than 6000 chars).
+   The UI copies `prompt` with `host.copyText` and opens `url` with `host.openExternal` (Claude app or browser).
+2. The user sends it in Claude (their own free/Pro account) and copies the whole answer.
+3. `GinN.ai.parseAnswer(text, context)` → same result shape as `plan()` with `source:'claude-app'`, `usage:null`,
+   `costUsd:null`: extracts the last ```json block (fallback: last balanced `{…}`), JSON.parse, then the same
+   normalisation/validation as API plans (unknown tweak ids dropped, fps clamped…). Errors: `AI_BAD_OUTPUT` with a
+   Russian hint («Скопируй ответ Claude целиком — с блоком кода в конце»).
+The AI page offers this mode by default when no API key is configured; API-key mode stays as «Автоматически (API-ключ)».
+The follow-up chat is API-only; in this mode the user simply continues the conversation in Claude.
+
 Mock host: `?aidemo=1` → `transport:'mock'`, `aiMessage` returns a canned Message built from `localPlan` after ~1.5 s
 (labelled «Демо»); otherwise mock uses `transport:'page'` with a key saved in localStorage.
 
